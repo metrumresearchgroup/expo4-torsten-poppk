@@ -1,0 +1,315 @@
+---
+title: "Shrinkage Priors"
+subtitle: > 
+  Use of shrinkage priors for covariate regression coefficients 
+#image: bbr-strip.png
+order: 500
+categories: 
+- bbr
+- priors
+- covariates
+- pmforest
+fig-cap-location: margin
+toc: true
+toc-depth: 2
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  cache = TRUE, 
+  autodep = TRUE, 
+  comment = '.', 
+  message = FALSE,
+  warning = FALSE,
+  out.width = 500, 
+  out.height = 750
+)
+```
+
+# Introduction
+
+Compared with specialized pharmacometrics tools, such as NONMEM®, Stan/Torsten is particularly well suited for cases where more flexibility is desired. This includes models with
+
+- random-effects distributions other than normal
+- prior distributions other than the limited set available
+in existing pharmacometrics tools
+- multiple submodels with different random-effect
+structures
+
+In this section, we illustrate the use of prior distributions that cannot be implemented in NONMEM®, specifically, spike-and-slab priors for covariate regression coefficients.
+
+Regularized regression using shrinkage priors, such as horseshoe or spike-and-slab priors, for regression coefficients is an approach for implementing models with a large number of potential covariate effects [{{< var ref.Piironen_Vehtari >}}, {{< var ref.George_McCulloch >}}, {{< var ref.Garcia_Rogers >}}]. For this Expo, we limit ourselves to the use of spike-and-slab priors for covariate effects on clearance. More realistically, we would also apply the shrinkage priors to covariate effects on other pharmacokinetic (PK) parameters. 
+
+The page demonstrates how to:
+
+- Revise Stan/Torsten population PK (popPK) models to use spike-and-slab priors for covariate regression coefficients.
+
+# Tools used
+
+<hr />
+
+\# MetrumRG packages {{< var used.bbr >}} {{< var used.bbrbayes >}}
+
+## CRAN packages
+
+{{< var used.dplyr >}}
+
+# Set up
+
+<hr />
+
+Load required packages and set file paths to your model and figure directories.
+
+```{r}
+library(bbr)
+library(bbr.bayes)
+library(here)
+library(tidyverse)
+library(yspec)
+library(pmforest)
+library(cmdstanr)
+library(posterior)
+library(bayesplot)
+library(tidybayes)
+library(glue)
+library(kableExtra)
+library(jsonlite)
+
+set_cmdstan_path(path = here("Torsten", "v0.91.0", "cmdstan"))
+
+MODEL_DIR <- here("model", "stan")
+FIGURE_DIR <- here("deliv", "figure")
+```
+
+```{r, echo=FALSE}
+
+bayesplot::color_scheme_set('viridis')
+theme_set(theme_bw())
+
+# Source some useful functions
+source(here("script", "mcmc-diagnostic-functions.R"))
+
+```
+
+# Spike-and-slab priors for covariate effects
+
+Spike-and-slab priors are shrinkage priors in the sense that they shrink "weak" regression coefficients towards zero. The type of spike-and-slab we use here constructs the prior for each regression coefficient as a mixture of two normal distributions with different variances. The "spike" is a distribution concentrated near to zero (i.e., a normal with mean zero and a small variance). The "slab" is a distribution spread over the range of plausible values (i.e., a normal with mean zero and a relatively large variance). 
+
+The overall approach is a variation on the full covariate modeling method [citation]  that uses the spike-and-slab priors to stabilize the estimation process by shrinking negligible covariate effects towards the spike while applying minimal regularization to non-negligible covariate effects.
+
+The spike-and-slab prior distribution has the following form for each covariate coefficient:
+
+\begin{align}
+\beta_x &\sim \lambda N\left(0, \sigma_\text{slab}\right) + 
+               \left(1 - \lambda\right) N\left(0, \sigma_\text{spike}\right) \\
+\lambda &\sim \text{beta}\left(a, b\right)
+\end{align}
+
+For our example, all of the covariate coefficients share the same hyperparameters: $\sigma\text{spike}$, $\sigma\text{slab}$, $a$ and $b$. This is reasonable if we normalize the covariates in some way. Let's normalize them by centering them about suitable reference values and dividing them by their observed sample standard deviations, i.e:
+
+\begin{align}
+\text{EGFR}_\text{norm} &= \frac{\log\left(\text{EGFR}/90\right)}{sd\left(\log\left(\text{EGFR}\right)\right)} \\
+\text{age}_\text{norm} &= \frac{\log\left(\text{age}/35\right)}{sd\left(\log\left(\text{age}\right)\right)} \\
+\text{albumin}_\text{norm} &= \frac{\log\left(\text{albumin}/4.5\right)}{sd\left(\log\left(\text{albumin}\right)\right)} \\
+\text{AAG}_\text{norm} &= \frac{\log\left(\text{AAG}/85\right)}{sd\left(\log\left(\text{AAG}\right)\right)} \\
+\text{AST}_\text{norm} &= \frac{\log\left(\text{AST}/25\right)}{sd\left(\log\left(\text{AST}\right)\right)} \\
+\text{ALT}_\text{norm} &= \frac{\log\left(\text{ALT}/22\right)}{sd\left(\log\left(\text{ALT}\right)\right)}
+\end{align}
+
+$\sigma_\text{spike} = 0.06$ corresponds to a 95% credible interval (CI) of $\left(0.79, 1.27\right)$ for the ratio of individual clearance to the population typical value due to the effect of a two standard deviation difference in a covariate. That seems consistent with the notion of a negligible covariate effect. For $\sigma_\text{slab}$, let's choose a value that permits a plausible range of values. Using the same logic as we did for $\sigma_\text{spike}$, $\sigma_\text{slab} = 0.5$ results in a 95% CI of $\left(0.095, 10.5\right)$ for the ratio of individual clearance to the typical population value due to the effects of a two standard deviation difference in a covariate. That corresponds to an extreme covariate effect. Finally, we need to choose the hyperparameters ($a$ and $b$) for the prior distribution of the mixing  parameter $\lambda$. Let's go with a value of 1 for both hyperparameters, resulting in a uniform distribution.
+
+# Model creation and submission
+
+We construct the Stan model ppkexpo6 by building on model ppkexpo4.
+
+```{r,eval = TRUE}
+ppkexpo4 <- read_model(here(MODEL_DIR, "ppkexpo4"))
+ppkexpo6 <- copy_model_from(ppkexpo4, "ppkexpo6", .inherit_tags = TRUE, 
+                      .overwrite = TRUE) %>%
+  add_description("PopPK model: ppkexpo4 plus additional covariates & spike-and-slab priors")
+```
+
+Now, manually edit `ppkexpo6.stan` to add additional covariates and incorporate spike-and-slab priors.
+
+Here, we copy previously created files from the demo folder.
+
+```{r,eval = TRUE}
+ppkexpo6 <- ppkexpo6 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo6.stan")) %>%
+  add_standata_file(here(MODEL_DIR, "demo", "ppkexpo6-standata.R")) %>%
+  add_staninit_file(here(MODEL_DIR, "demo", "ppkexpo6-init.R"))
+```
+The resulting Stan model ppkexpo6:
+
+```{r, echo=FALSE}
+ppkexpo6 <- read_model(here(MODEL_DIR, "ppkexpo6"))
+cat(readLines(get_model_path(ppkexpo6)), sep = "\n")
+```
+
+## ppkexpo6: Submit the model
+
+```{r,eval = TRUE}
+
+## Set cmdstanr arguments
+ppkexpo6 <- ppkexpo6 %>%
+  set_stanargs(list(iter_warmup = 500,
+                    iter_sampling = 500,
+                    thin = 1,
+                    chains = 4,
+                    parallel_chains = 4,
+                    seed = 1234,
+                    save_warmup = FALSE),
+               .clear = TRUE)
+
+## Fit the model using Stan
+ppkexpo6_fit <- ppkexpo6 %>% submit_model(.overwrite = TRUE)
+
+```
+
+## ppkexpo6: Parameter summary and sampling diagnostics
+
+```{r}
+model_name <- "ppkexpo6"
+mod <- read_model(here(MODEL_DIR, model_name))
+fit <- read_fit_model(mod)
+
+fit$cmdstan_diagnose()
+pars <- c("lp__", "CLHat", "QHat", "V2Hat", "V3Hat", "kaHat",
+          "EGFR_CL", "age_CL", "albumin_CL", "sex_CL", "AAG_CL", 
+          "AST_CL", "ALT_CL", "lambda_mix", 
+          "sigma", glue("omega[{1:5}]"),
+          paste0("rho[", matrix(apply(expand.grid(1:5, 1:5),
+                                      1, paste, collapse = ","),
+                                ncol = 5)[upper.tri(diag(5), 
+                                                    diag = FALSE)], "]"))
+# Get posterior samples for parameters of interest
+posterior <- fit$draws(variables = pars)
+# Get quantities related to NUTS performance, e.g., occurrence of
+# divergent transitions
+np <- nuts_params(fit) 
+
+n_iter <- dim(posterior)[1]
+n_chains <- dim(posterior)[2]
+
+ptable <- fit$summary(variables = pars) %>%
+  mutate(across(-variable, ~ pmtables::sig(.x, maxex = 4))) %>% 
+  rename(parameter = variable) %>%
+  mutate("90% CI" = paste("(", q5, ", ", q95, ")", 
+                          sep = "")) %>%
+  select(parameter, mean, median, sd, mad, "90% CI", ess_bulk, ess_tail, rhat)
+
+ptable %>% 
+  kable %>%
+  kable_styling()
+```
+
+## Trace and density plots
+
+Next, we look at the trace and density plots.
+
+```{r}
+mcmc_history_plots <- mcmc_history(posterior,
+                                  nParPerPage = 6, 
+                                  np = np)
+```
+
+```{r}
+#| label: fig-trace-ppkexpo6
+#| fig-cap: MCMC trace plots for model ppkexpo6.
+#| out-width: 100%
+mcmc_history_plots
+```
+
+```{r}
+  mcmc_density_chain_plots <- mcmc_density(posterior, 
+                                           nParPerPage = 6, byChain = TRUE)
+```
+
+```{r}
+#| label: fig-density-ppkexpo6
+#| fig-cap: MCMC density plots for model ppkexpo6.
+#| out-width: 100%
+mcmc_density_chain_plots
+```
+
+# Covariate forest plots
+
+## Construct data for creating forest plots
+
+Calculate posterior samples for "typical" clearance in reference patients and for various subgroups constructed by varying one covariate at a time.
+
+```{r}
+
+CL_pars <- fit$draws(variables = c("EGFR_CL", "age_CL", 
+                                  "albumin_CL", "sex_CL", "AAG_CL", 
+                                  "AST_CL", "ALT_CL"), 
+                     format = "draws_df") %>%
+  pivot_longer(cols = ends_with("_CL")) %>%
+  mutate(group = str_split_i(name, "_", 1))
+
+covariate_ranges <- data.frame(group = c("EGFR", "EGFR", "EGFR",
+                                         "albumin", "albumin",
+                                         "age", "age",
+                                         "sex", "sex",
+                                         "AAG", "AAG",
+                                         "AST", "AST",
+                                         "ALT", "ALT"),
+                               group_level = c(22.6, 42.9, 74.9,
+                                               3.25, 5,
+                                               20, 45,
+                                               0, 1,
+                                               53, 115,
+                                               11, 34,
+                                               12,32))
+
+covariates <- read_json(get_data_path(mod), simplifyVector = TRUE)
+covariates <- as_tibble(covariates[c("EGFR", "age", "albumin", 
+                                     "AAG", "AST", "ALT")])
+sd_cov <- sapply(covariates, function(x) sd(log(x)))
+sd_cov <- tibble(group = names(sd_cov), sd = sd_cov)
+
+ref <- tibble(group = c("EGFR", "age", "albumin", "AAG", "AST", "ALT"),
+              ref = c(90, 35, 4.5, 85, 25, 22))
+
+CL_sims <- covariate_ranges %>%
+  left_join(ref) %>%
+  left_join(sd_cov) %>%
+  left_join(CL_pars)
+
+CL_sims <- CL_sims %>%
+  mutate(CLratio = if_else(group == "sex",
+                           exp(value * group_level),
+                           exp(value * log(group_level / ref) / sd)))
+
+CL_summary <- summarize_data(CL_sims, value = "CLratio", group = "group",
+                             group_level = "group_level")
+
+cl_forest <- plot_forest(CL_summary, 
+##  summary_label = plot_labels,
+  text_size = 3.5,
+  vline_intercept = 1,
+  x_lab = "Fraction and 95% CI \nRelative to Reference",
+  CI_label = "Median [95% CI]",
+  plot_width = 8, 
+  x_breaks = c(0.4,0.6, 0.8, 1, 1.2, 1.4,1.6), 
+  x_limit = c(0.4,1.45),
+  annotate_CI = TRUE,
+  nrow = 1
+) 
+
+```
+
+```{r}
+#| label: fig-forest-ppkexpo6
+#| fig-cap: Forest plots of covariate effects on clearance for model ppkexpo6.
+#| out-width: 100%
+cl_forest
+```
+
+# Other resources
+ <hr /> 
+ 
+The following script from the {{< var public_expo_repo.main >}} is discussed on this page. If you're interested running this code, visit the {{< var pages.about_the_repo >}} page first.
+
+Shrinkage Priors script: {{< var public_expo_repo.shrinkage_priors >}} 

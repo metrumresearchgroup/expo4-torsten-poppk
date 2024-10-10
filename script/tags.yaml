@@ -1,0 +1,30 @@
+# NOTE: this is only to demonstrate how to set up this file.
+# We recommend using this as a template for defining your own
+# tags to suit your project.
+
+# model structure
+two_cpt_abs: "linear two compartment + first-order absorption"
+CP: "centered parameterization"
+NCP: "non-centered parameterization"
+
+# IIV
+logCL_normalIIV: "log(CL) ~ normal IIV"
+logQ_normalIIV: "log(Q) ~ normal IIV"
+logV2_normalIIV: "log(V2) ~ normal IIV"
+logV3_normalIIV: "log(V3) ~ normal IIV"
+logka_normalIIV: "log(ka) ~ normal IIV"
+
+# RUV
+lognormal_ruv: "lognormal RUV"
+proportional_ruv: "proportional RUV"
+additive_ruv: "additive RUV"
+combined_ruv: "combined RUV"
+
+# covariates
+allometric: "fixed allometric scaling"
+EGFR_CL: "EGFR on CL"
+age_CL: "age on CL"
+albumin_CL: "albumin on CL"
+
+# data
+

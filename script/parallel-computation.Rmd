@@ -1,0 +1,290 @@
+---
+title: "Parallel Computation"
+subtitle: > 
+  Implementing within-chain parallel computation with Stan/Torsten 
+#image: bbr-strip.png
+order: 500
+categories: 
+- bbr
+- model management
+- parallel computation
+fig-cap-location: margin
+toc: true
+toc-depth: 2
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  cache = TRUE, 
+  autodep = TRUE, 
+  comment = '.', 
+  message = FALSE,
+  warning = FALSE,
+  out.width = 500, 
+  out.height = 750
+)
+```
+
+# Introduction
+
+Stan provides mechanisms for parallel computation within each Markov Chain Monte Carlo (MCMC) using either multi-threading or message passing interface (MPI). Let's see how we can do this for our population pharmacokinetic (popPK) example. We use multi-threading which requires we modify the Stan model so it uses the `reduce_sum` function for calculating the overall log-probability. Meaning, we need to write a user-defined Stan function to calculate the log-probability for the data from a subset of individuals. It also requires that Torsten and the model file be compiled with `cpp_options = list(stan_threads = TRUE)`.
+
+The results shown here were run on a computer with 64 vCPUs, allowing for simultaneous running up to four chains with 16 threads/chain.
+
+The page demonstrates how to:
+
+- Revise Stan/Torsten popPK models to permit within-chain parallel computation using multi-threading
+- Compile and execute Stan/Torsten models to use multi-threading
+
+# Tools used
+
+<hr />
+
+## MetrumRG packages 
+
+{{< var used.bbr >}} 
+{{< var used.bbrbayes >}}
+
+## CRAN packages
+
+{{< var used.dplyr >}}
+
+# Set up
+
+<hr />
+
+Load required packages and set file paths to your model and figure directories.
+
+```{r}
+library(bbr)
+library(bbr.bayes)
+library(here)
+library(tidyverse)
+library(yspec)
+library(cmdstanr)
+library(posterior)
+library(bayesplot)
+library(tidybayes)
+library(glue)
+library(kableExtra)
+
+set_cmdstan_path(path = here("Torsten", "v0.91.0", "cmdstan"))
+
+MODEL_DIR <- here("model", "stan")
+FIGURE_DIR <- here("deliv", "figure")
+```
+
+```{r, echo=FALSE}
+
+bayesplot::color_scheme_set('viridis')
+theme_set(theme_bw())
+
+```
+
+# Revise model to use multi-threading
+
+Let's modify ppkexpo5 to use `reduce_sum` and call it ppkexpo5_rs1.
+
+```{r setup_ppkexpo5_rs1,eval = TRUE}
+ppkexpo5 <- read_model(here(MODEL_DIR, "ppkexpo5"))
+ppkexpo5_rs1 <- copy_model_from(ppkexpo5, "ppkexpo5_rs1", .inherit_tags = TRUE, 
+                      .overwrite = TRUE) %>%
+  add_description("PopPK model: ppkexpo5 using reduce_sum")
+```
+
+Now, manually edit `ppkexpo5_rs1.stan` to implement `reduce_sum`. Recall that Stan calculates the sum of log probabilities over all the levels of a hierarchical model. In our case, there are three such levels: the prior distributions, the individual-level random effects, and the observed data. To use `reduce_sum`, we need to create a Stan function that calculates the sum of log probabilities for a subset of individuals. That requires a bit of book-keeping in the code and some changes to the data. That means we also need to edit `ppkexpo5_rs1-standata.R`.
+
+For this demo, we copy previously created files from the demo folder.
+
+```{r setup2_ppkexpo5_rs1,eval = TRUE}
+ppkexpo5_rs1 <- ppkexpo5_rs1 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo5_rs1.stan")) %>%
+  add_standata_file(here(MODEL_DIR, "demo", "ppkexpo5_rs1-standata.R"))
+```
+
+There are two forms of the `reduce_sum` function: `reduce_sum` and `reduce_sum_static`. `reduce_sum` uses a dynamic scheduling algorithm to automatically partition the individuals for parallel computation, so the partitioning changes from one iteration to the next. A consequence of this is that the results are not strictly reproducible. On the other hand, `reduce_sum_static` always partitions the individuals the same way each time for a given data set and grainsize (the maximum number of individuals in each partition). Since we want reproducibility of our analyses, we use `reduce_sum_static`.
+
+Here is the resulting Stan model ppkexpo5_rs1:
+
+```{r, echo=FALSE}
+ppkexpo5_rs1 <- read_model(here(MODEL_DIR, "ppkexpo5_rs1"))
+cat(readLines(get_model_path(ppkexpo5_rs1)), sep = "\n")
+```
+
+The key difference from ppkexpo5 is that much of the code in the transformed parameters block has been moved into the function called `partial_sum` which is defined in the functions block. We can see that even more clearly using the `model_diff` function. By default, the model is compared to the model which it was based on (in this case, ppkexpo5).
+
+```{r}
+model_diff(ppkexpo5_rs1)
+```
+Here is the `ppkexpo5_rs1-standata.R` file:
+
+```{r, echo=FALSE}
+cat(readLines(build_path_from_model(ppkexpo5_rs1, "-standata.R")), sep = "\n")
+```
+
+And how it differs from the `ppkexpo5-standata.R` file:
+
+```{r}
+model_diff(ppkexpo5_rs1, .file = "standata")
+```
+The handling of grainsize is worth a few comments. Its value may be set by hard-coding in the transformed data block of the model or by passing it in through the data set. For this example, we pass it via the data set. We could do that when we manually edit the `-standata.R` file; however, we do something a little different so we can automatically loop over a range of gransize values and change the value of grainsize in the `-standata.R` file without manual editing. We write the grainsize value to a file in the model folders. The corresponding `-standata.R` files read the grainsize value from those files at run time. That's the reason behind the following statement in the `-standata.R` file.
+
+`grainsize <- readRDS(file.path(.dir, "grainsize.RDS"))`
+
+# Submit the model
+
+Once we have a model that enables multi-threading (i.e., a model that uses `reduce_sum`), model submission is almost the same as before. Key differences are:
+
+- Setting the `STAN_NUM_THREADS` environmental variable
+- Setting the `threads_per_chain` argument of `set_stanargs`
+- Calculating the value of grainsize and writing it to a file in the model folder
+
+Let's start with two threads per chain.
+
+```{r fit_ppkexpo5_rs1,eval = TRUE}
+
+threads_per_chain <- 2
+
+## There is a bug in the current bbr.bayes version that prevents threading when the 
+## model is compiled by submit_model amd STAN_NUM_THREADS is not set by some other
+## mechanism. (Issue 59)
+Sys.setenv(STAN_NUM_THREADS = threads_per_chain)
+
+## Set cmdstanr arguments
+ppkexpo5_rs1 <- ppkexpo5_rs1 %>%
+  set_stanargs(list(iter_warmup = 500,
+                    iter_sampling = 500,
+                    thin = 1,
+                    chains = 4,
+                    parallel_chains = 4,
+                    threads_per_chain = threads_per_chain,
+                    seed = 1234,
+                    save_warmup = FALSE),
+               .clear = TRUE)
+
+## Write the value of the grainsize paraneter of reduce_sum to a file.
+
+grainsize <- round(160 / threads_per_chain)
+saveRDS(grainsize, file = here::here("model", "stan", "ppkexpo5_rs1", "grainsize.RDS"))
+
+## Fit the model using Stan
+ppkexpo5_rs1_fit <- ppkexpo5_rs1 %>% submit_model(.overwrite = TRUE)
+
+```
+
+If the model has already been fitted, you can read it using the following
+statements without having to refit the model.
+
+```{r read_ppkexpo5_rs1}
+ppkexpo5_rs1 <- read_model(here(MODEL_DIR, "ppkexpo5_rs1"))
+ppkexpo5_rs1_fit <- read_fit_model(ppkexpo5_rs1)
+```
+
+Now, loop over a range of `threads_per_chain` values to explore how the number of threads affects the computation time.
+
+```{r ppkexpo5_rsn,eval = TRUE}
+
+threads_per_chain <- c(2, 4, 8, 16)
+for(i in 2:length(threads_per_chain)){
+  
+  assign(paste0("ppkexpo5_rs", i), 
+         copy_model_from(ppkexpo5_rs1, paste0("ppkexpo5_rs", i), .inherit_tags = TRUE, 
+                         .overwrite = TRUE))
+  
+  Sys.setenv(STAN_NUM_THREADS = threads_per_chain[i])
+  
+  ## Set cmdstanr arguments
+  assign(paste0("ppkexpo5_rs", i), 
+         get(paste0("ppkexpo5_rs", i)) %>%
+           set_stanargs(list(iter_warmup = 500,
+                             iter_sampling = 500,
+                             thin = 1,
+                             chains = 4,
+                             parallel_chains = 4,
+                             threads_per_chain = threads_per_chain[i],
+                             seed = 1234,
+                             save_warmup = FALSE),
+                        .clear = TRUE) %>%
+           add_description("PopPK model: ppkexpo5 using reduce_sum"))
+  
+  ## Write the value of the grainsize paraneter of reduce_sum to a file.
+  
+  grainsize <- round(160 / threads_per_chain[i])
+  saveRDS(grainsize, file = here::here("model", "stan", paste0("ppkexpo5_rs", i),
+                                       "grainsize.RDS"))
+  
+  ## Fit the model using Stan
+  assign(paste0("ppkexpo5_rs", i, "_fit"),
+         get(paste0("ppkexpo5_rs", i)) %>% submit_model(.overwrite = TRUE))
+  
+}
+
+```
+
+If the models have already been fitted, you can read them using the following
+statements without having to refit the models.
+
+```{r read_ppkexpo5_rs2}
+
+for(i in 2:4){
+  assign(paste0("ppkexpo5_rs", i),
+         read_model(here(MODEL_DIR, paste0("ppkexpo5_rs", i))))
+  assign(paste0("ppkexpo5_rs", i, "_fit"),
+         read_fit_model(here(MODEL_DIR, paste0("ppkexpo5_rs", i))))
+}
+  
+```
+
+Now, we can use the `stan_summary_log` function to tabulate the run times.
+
+```{r parallel_compare}
+
+## threads_per_chain <- c(1, 2, 4, 8, 16)
+
+## Summary log
+
+sum_log_rs <- stan_summary_log(MODEL_DIR) %>%
+  filter(grepl("ppkexpo5", run)) %>%
+  filter(!grepl("_gq", run))
+
+sum_log_rs <- sum_log_rs %>%
+  mutate(total_time = list_simplify(map(fit, ~.$time()$total)),
+         threads_per_chain = list_simplify(map(fit, ~.$metadata()$threads_per_chain)))
+
+sum_log_rs %>%
+  select(run, iter_warmup, iter_sampling, threads_per_chain, total_time) %>%
+  mutate(total_time = pmtables::sig(total_time / 60, 3)) %>%
+  rename("total_time (min)" = total_time) %>%
+  arrange(threads_per_chain) %>%
+  knitr::kable() %>%
+  kable_styling()
+
+time_data <- sum_log_rs %>%
+  select(threads_per_chain, total_time) %>%
+  arrange(threads_per_chain)
+
+run_time_plot <- ggplot(time_data, aes(x = threads_per_chain, y = total_time / 60)) +
+  geom_line() +
+  scale_y_log10() +
+  labs(x = "threads/chain",
+       y = "time (min)")
+
+```
+```{r}
+#| label: fig-run_time_plot
+#| fig-cap: Decrease in computation time as the the number of threads per chain increases when run on a 64 vCPU computer.
+#| out-width: 100%
+
+# show plot in HTML output
+run_time_plot
+```
+
+We see that going from one to 16 threads per chain reduces the run time from `r pmtables::sig(time_data$total_time[1] / 60, 3)` minutes to `r pmtables::sig(time_data$total_time[5] / 60, 3)` minutes.
+
+# Other resources
+ <hr /> 
+ 
+The following script from the {{< var public_expo_repo.main >}} is discussed on this page. If you're interested running this code, visit the {{< var pages.about_the_repo >}} page first.
+
+Parallel Computation script: {{< var public_expo_repo.parallel_computation >}} 

@@ -1,0 +1,440 @@
+---
+title: "Generated Quantities Models"
+subtitle: > 
+  Generated quantities model workflow with bbr.bayes. 
+#image: bbr-strip.png
+order: 500
+categories: 
+- bbr
+- bbr.bayes
+- model management
+- simulation
+fig-cap-location: margin
+toc: true
+toc-depth: 2
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  cache = TRUE, 
+  autodep = TRUE, 
+  comment = '.', 
+  message = FALSE,
+  warning = FALSE,
+  out.width = 500, 
+  out.height = 750
+)
+```
+
+# Introduction
+
+We often want to perform further calculations using the posterior samples from previous model fits. Examples of such calculations include the following:
+
+- Generate additional posterior predictive checks or other model diagnostics that you didn't anticipate when fitting the model.
+- Simulate patient outcomes for alternative treatment regimens or specific patient populations.
+- Simulate trial outcomes for potential future trial designs.
+
+Such calculations can often be done most efficiently using `cmdstan`'s `generated_quantities` method, and `bbr.bayes` can provide convenient functions for implementing calculations using `generated_quantities`.
+
+This section demonstrates the use of `bbr.bayes` `generated_quantities` functionality for calculations required for posterior predictive checks and for simulations of drug concentrations as a function of renal function (eGFR). Another application of `generated_quantities` is demonstrated in the "Summarizing and comparing models" section where we use this method to calculate metrics for model comparison.
+
+For more information about the `generate_quantities` method, see the sections describing stand-alone generated quantities models in the quick-start portion of the {{< var ref.cmdstan-gq >}} and the {{< var ref.stan-gq >}}.
+
+
+# Tools used
+
+<hr />
+
+## MetrumRG packages
+{{< var used.bbr >}}
+{{< var used.bbrbayes >}}
+
+## CRAN packages
+{{< var used.dplyr >}}
+{{< var used.bayesplot >}}
+{{< var used.posterior >}}
+{{< var used.tidyvpc >}}
+{{< var used.tidybayes >}}
+
+# Set up
+
+<hr />
+
+Load required packages and set file paths to your model and figure directories. 
+
+```{r}
+library(bbr)
+library(bbr.bayes)
+library(here)
+library(tidyverse)
+library(yspec)
+library(cmdstanr)
+library(posterior)
+library(bayesplot)
+library(tidybayes)
+library(tidyvpc)
+library(glue)
+library(kableExtra)
+
+set_cmdstan_path(path = here("Torsten", "v0.91.0", "cmdstan"))
+
+MODEL_DIR <- here("model", "stan")
+FIGURE_DIR <- here("deliv", "figure")
+```
+
+
+```{r, echo=FALSE}
+
+bayesplot::color_scheme_set('viridis')
+theme_set(theme_bw())
+
+# Source some useful functions
+source(here("script", "mcmc-diagnostic-functions.R"))
+
+```
+
+# Separating the model fitting and posterior predictive simulation tasks
+
+The models presented so far (ppkexpo1 - ppkexpo4) include code in the `generated quantities` block to generate predicted values for use in posterior predictive checks. Thus, calculations for model fitting and posterior predictive checking is done in one step. Posterior predictions can contribute greatly to the size of the files containing the posterior samples, particularly, when analyzing large data sets. Additionally, the posterior predictive calculations contribute to the overall time required for computation. During more exploratory model development stages, you may want to postpone those posterior predictive calculations to speed up computation and reduce disk storage requirements. You can reserve the posterior predictive calculations for only the more promising model candidates without having to refit the model by exploiting `cmdstan`'s `generated_quantities` method. 
+
+# Model creation and submission
+
+<hr />
+
+Let's start by replicating model ppkexpo4 without any content in the generated quantities block. Call it ppkexpo5.
+
+```{r setup_ppkexpo5,eval = TRUE}
+ppkexpo4 <- read_model(here(MODEL_DIR, "ppkexpo4"))
+
+ppkexpo5 <- copy_model_from(ppkexpo4, "ppkexpo5", .inherit_tags = TRUE, 
+                      .overwrite = TRUE) %>%
+  add_description("PopPK model: ppkexpo4 without simulations for PPCs")
+```
+
+Now, manually edit `ppkexpo5.stan` by deleting statements in the generated quantities block used to calculate posterior predictions. For this demo, we copy previously created files from the demo folder.
+
+```{r setup2_ppkexpo5,eval = TRUE}
+ppkexpo5 <- ppkexpo5 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo5.stan"))
+```
+
+Here is the resulting Stan model.
+
+```{r, echo=FALSE}
+ppkexpo5 <- read_model(here(MODEL_DIR, "ppkexpo5"))
+cat(readLines(get_model_path(ppkexpo5)), sep = "\n")
+```
+
+## ppkexpo5: Submit the model
+
+```{r fit_ppkexpo5,eval = TRUE}
+## Set cmdstanr arguments
+ppkexpo5 <- ppkexpo5 %>%
+  set_stanargs(list(iter_warmup = 500,
+                    iter_sampling = 500,
+                    thin = 1,
+                    chains = 4,
+                    parallel_chains = 4,
+##                    refresh = 10,
+                    seed = 1234,
+                    save_warmup = FALSE),
+               .clear = TRUE)
+
+## Check that the necessary files are present
+check_stan_model(ppkexpo4)
+
+## Fit the model using Stan
+ppkexpo5_fit <- ppkexpo5 %>% submit_model(.overwrite = TRUE)
+```
+
+## ppkexpo5: Parameter summary and sampling diagnostics
+
+```{r}
+model_name <- "ppkexpo5"
+mod <- read_model(here(MODEL_DIR, model_name))
+fit <- read_fit_model(mod)
+
+fit$cmdstan_diagnose()
+
+pars <- c("lp__", "CLHat", "QHat", "V2Hat", "V3Hat", "kaHat",
+          "EGFR_CL", "age_CL", "albumin_CL",
+          "sigma", glue("omega[{1:5}]"),
+          paste0("rho[", matrix(apply(expand.grid(1:5, 1:5),
+                                      1, paste, collapse = ","),
+                                ncol = 5)[upper.tri(diag(5), 
+                                                    diag = FALSE)], "]"))
+# Get posterior samples for parameters of interest
+posterior <- fit$draws(variables = pars)
+# Get quantities related to NUTS performance, e.g., occurrence of
+# divergent transitions
+np <- nuts_params(fit) 
+
+n_iter <- dim(posterior)[1]
+n_chains <- dim(posterior)[2]
+
+ptable <- fit$summary(variables = pars) %>%
+  mutate(across(-variable, ~ pmtables::sig(.x, maxex = 4))) %>% 
+  rename(parameter = variable) %>%
+  mutate("90% CI" = paste("(", q5, ", ", q95, ")", 
+                          sep = "")) %>%
+  select(parameter, mean, median, sd, mad, "90% CI", ess_bulk, ess_tail, rhat)
+
+ptable %>% 
+  kable %>%
+  kable_styling()
+```
+
+As expected, the results are essentially the same as those for ppkexpo4. Suppose we want to perform posterior predictive checking since he samples generated by the ppkexpo5 fitting did not include the posterior predictions we needed. We do that as a separate step. 
+
+## Model ppkexpo5_gq1: Simulations for PPCs
+
+To construct our generated quantities model, we copy the ppkexpo5 model using a specialized `copy_model_from` function called `copy_model_as_stan_gq`. In addition to copying the files from the ppkexpo5 model like `copy_model_from` does, `copy_model_as_stan_gq` generates a `ppkexpo5-fitted-param.R` file that contains a function for getting the posterior samples from the parent model.
+
+```{r setup_ppkexpo5_gq1,eval = TRUE}
+ppkexpo5 <- read_model(here(MODEL_DIR, "ppkexpo5"))
+
+ppkexpo5_gq1 <- copy_model_as_stan_gq(ppkexpo5, "ppkexpo5_gq1", .inherit_tags = TRUE, 
+                      .overwrite = TRUE) %>%
+  add_description("PopPK model: ppkexpo5 model to generate simulations for PPCs")
+```
+
+Now, manually edit `ppkexpo5_gq1.stan` by deleting the contents of the model block and adding simulation code in the generated quantities block. For this demo, we copy previously created files from the demo folder.
+
+```{r setup2_ppkexpo5_gq1,eval = TRUE}
+ppkexpo5_gq1 <- ppkexpo5_gq1 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo5_gq1.stan"))
+```
+
+Here is the resulting Stan model.
+
+```{r, echo=FALSE}
+ppkexpo5_gq1 <- read_model(here(MODEL_DIR, "ppkexpo5_gq1"))
+cat(readLines(get_model_path(ppkexpo5_gq1)), sep = "\n")
+```
+
+## ppkexpo5_gq1: Submit the model
+
+```{r sim_ppkexpo5_gq1,eval = TRUE}
+## Set cmdstanr arguments
+ppkexpo5_gq1 <- ppkexpo5_gq1 %>%
+  set_stanargs(list(parallel_chains = 4,
+                    seed = 1234),
+               .clear = TRUE)
+
+## Check that the necessary files are present
+check_stan_model(ppkexpo5_gq1)
+
+## Simulate using Stan
+ppkexpo5_gq1_sim <- ppkexpo5_gq1 %>% submit_model(.overwrite = TRUE)
+```
+
+## Model evaluation
+
+We can now construct posterior predictive checks using the predicted values generated with `ppkexpo5_gq1`.
+
+```{r ppc_study, cache.lazy = FALSE}
+model_name <- "ppkexpo5_gq1"
+mod <- read_model(here(MODEL_DIR, model_name))
+fit <- read_fit_model(mod)
+
+load(file = here::here(dirname(get_data_path(mod)), "data1.RData"))
+loq <- 10
+
+data2 <- data1 %>%
+  mutate(DV = if_else(EVID == 1, NA_real_, DV),
+         DV = if_else(BLQ == 1, NA_real_, DV))
+
+pred2 <- spread_draws(fit, 
+                     cPredNew[num]) %>%
+  mutate(cPredNew = ifelse(cPredNew < loq, NA_real_, cPredNew)) %>%
+  left_join(data2 %>% mutate(num = 1:n())) %>%
+  mutate(cPredNew = ifelse(EVID == 1 | TIME == 0, NA_real_, cPredNew))
+
+ppc_all <- observed(data2, x = TIME, y = DV) %>%
+  simulated(pred2 %>% arrange(.draw, num), y = cPredNew) %>% 
+  stratify(~ STUDY) %>% 
+  binning(bin = 'jenks', nbins = 10) %>% 
+  vpcstats()
+
+```
+
+```{r}
+#| label: fig-ppc-ppkexpo4
+#| fig-cap: Posterior predictive check for model ppkexpo4.
+#| out-width: 100%
+
+plot(ppc_all, legend.position = "top", 
+     color = c("steelblue3", "grey60", "steelblue3"),
+     linetype = c("dashed", "solid", "dashed"),
+     ribbon.alpha = 0.5) + 
+  scale_y_log10() +
+  labs(x = "time (h)",
+       y = "plasma drug concentration (mg/L)")
+
+```
+
+# PPCs for fraction of BLQs
+
+This is a predictive check on the fraction of observations below limit of quantification (BLQ) versus time. We take just the single dose studies and limit the analysis out to 100 hours after the dose. 
+
+```{r}
+
+pred3 <- spread_draws(fit, 
+                     cPredNew[num]) %>%
+  left_join(data2 %>% mutate(num = 1:n())) %>%
+  mutate(BLQsim = ifelse(cPredNew < loq, 1, 0),
+         BLQsim = ifelse(EVID == 0, BLQsim, NA_integer_)) %>% 
+  filter(STUDY %in% c("101-DEMO-001", "201-DEMO-004"),
+         TIME <= 100)
+
+data3 <- data2 %>%
+  filter(STUDY %in% c("101-DEMO-001", "201-DEMO-004"),
+         TIME <= 100)
+
+ppc_blq <- observed(data3, x = TIME, y = BLQ) %>%
+  simulated(pred3 %>% arrange(.draw, num), y = BLQsim) %>% 
+  stratify(~ STUDY) %>% 
+  binning(bin = 'jenks', nbins = 10) %>% 
+  vpcstats(vpc.type = "categorical")
+
+## Change factor labels to make more readable
+ppc_blq$stats <- ppc_blq$stats %>%
+  mutate(pname = factor(pname, labels = c(">= LOQ", "< LOQ")))
+
+```
+
+```{r}
+#| label: fig-ppc_blq-ppkexpo4
+#| fig-cap: Posterior predictive check of the the fraction of observations that are BLQ for model ppkexpo4.
+#| out-width: 100%
+
+plot(ppc_blq, legend.position = "top",
+     ribbon.alpha = 0.5,
+     xlab = "time (h)",
+     ylab = "fraction above or below LOQ")
+
+```
+
+# Simulation of the probable range of plasma concentrations as a function of eGFR
+
+Let's use a generated quantities model to simulate posterior-predicted plasma concentrations in "typical" patients with different eGFR measurements. We define a "typical" patient as a 35-year-old that weighs 70 kg and with an albumin of 4.5 g/dL. 
+
+The idea is to calculate posterior predictive intervals for the population median, 5th percentile, and 95th percentile of the plasma drug concentration as a function of time. We use Stan/Torsten to simulate outcomes for a large population of individual patients for each posterior sample and to calculate the relevant quantiles at each time. That way, we only need to save the summary statistics to a file rather than all of the individual patient values.
+
+```{r setup_ppkexpo5_gq2,eval = TRUE}
+ppkexpo5 <- read_model(here(MODEL_DIR, "ppkexpo5"))
+
+ppkexpo5_gq2 <- copy_model_as_stan_gq(ppkexpo5, "ppkexpo5_gq2", 
+                                      .inherit_tags = TRUE, 
+                                      .overwrite = TRUE) %>%
+  add_description("PopPK model: ppkexpo5 model to simulate PK as a function of EGFR")
+```
+
+Now, manually edit `ppkexpo5_gq2.stan` by revising the generated quantities block.
+
+Copy the previously created files from the demo folder.
+
+```{r setup2_ppkexpo5_gq2,eval = TRUE}
+ppkexpo5_gq2 <- ppkexpo5_gq2 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo5_gq2.stan"))
+```
+
+Here is the resulting Stan model.
+
+```{r, echo=FALSE}
+ppkexpo5_gq2 <- read_model(here(MODEL_DIR, "ppkexpo5_gq2"))
+cat(readLines(get_model_path(ppkexpo5_gq2)), sep = "\n")
+```
+
+## ppkexpo5_gq2: Submit the model
+
+```{r sim_ppkexpo5_gq2,eval = TRUE}
+## Set cmdstanr arguments
+ppkexpo5_gq2 <- ppkexpo5_gq2 %>%
+  set_stanargs(list(parallel_chains = 4,
+                    seed = 1234),
+               .clear = TRUE)
+
+## Check that the necessary files are present
+check_stan_model(ppkexpo5_gq2)
+
+## Simulate using Stan
+ppkexpo5_gq2_sim <- ppkexpo5_gq2 %>% submit_model(.overwrite = TRUE)
+```
+
+## Plot posterior predictions of plasma drug concentrations as a function of time and renal function
+
+
+```{r sim_by_EGFR}
+model_name <- "ppkexpo5_gq2"
+mod <- read_model(here(MODEL_DIR, model_name))
+fit <- read_fit_model(mod)
+
+ntSim <- 193
+tSim <- seq(0, ntSim - 1)
+EGFR <- c(20, 40, 60, 90)
+
+sim1 <- spread_draws(fit, 
+                     cPred5[iEGFR, itSim],
+                     cPred50[iEGFR, itSim],
+                     cPred95[iEGFR, itSim]) %>%
+  mutate(time = tSim[itSim],
+         EGFR = EGFR[iEGFR])
+
+sim1_summary <- sim1 %>%
+  group_by(time, EGFR) %>%
+  summarize(lo_cPred5 = quantile(cPred5, 0.025),
+            med_cPred5 = quantile(cPred5, 0.5),
+            hi_cPred5 = quantile(cPred5, 0.975),
+            lo_cPred50 = quantile(cPred50, 0.025),
+            med_cPred50 = quantile(cPred50, 0.5),
+            hi_cPred50 = quantile(cPred50, 0.975),
+            lo_cPred95 = quantile(cPred95, 0.025),
+            med_cPred95 = quantile(cPred95, 0.5),
+            hi_cPred95 = quantile(cPred95, 0.975)) %>%
+  ungroup
+
+EGFR_plot <- ggplot(sim1_summary, aes(x = time, y = med_cPred50)) +
+  geom_line(aes(x = time, y = med_cPred5, color = "5th & 95th percentiles")) +
+  geom_ribbon(aes(ymin = lo_cPred5, ymax = hi_cPred5, 
+                  fill = "5th & 95th percentiles"), alpha = 0.25) +
+  geom_line(aes(x = time, y = med_cPred50, color = "median")) +
+  geom_ribbon(aes(ymin = lo_cPred50, ymax = hi_cPred50, 
+                  fill = "median"), alpha = 0.25) +
+  geom_line(aes(x = time, y = med_cPred95, color = "5th & 95th percentiles")) +
+  geom_ribbon(aes(ymin = lo_cPred95, ymax = hi_cPred95, 
+                  fill = "5th & 95th percentiles"), alpha = 0.25) +
+  scale_color_brewer(name  ="median & 95 % CI",
+                     breaks=c("median", "5th & 95th percentiles"),
+                     palette = "Set1") +
+  scale_fill_brewer(name  ="median & 95 % CI",
+                     breaks=c("median", "5th & 95th percentiles"),
+                    palette = "Set1") +
+##  scale_y_log10() +
+  labs(x = "time (h)",
+       y = "plasma drug concentration (mg/L)") +
+  theme(text = element_text(size = 12),
+        axis.text = element_text(size = 8),
+        legend.position = "bottom",
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~ EGFR)
+
+```
+
+```{r}
+#| fig-cap: Posterior predictions of plasma drug concentrations as a function of time and renal function (EGFR).
+#| label: fig-EGFR
+#| out-width: 100%
+
+EGFR_plot
+
+```
+
+
+# Other resources
+ <hr /> 
+ 
+The following script from the {{< var public_expo_repo.main >}} is discussed on this page. If you're interested running this code, visit the {{< var pages.about_the_repo >}} page first.
+
+Generated Quantities script: {{< var public_expo_repo.generated_quantities >}} 

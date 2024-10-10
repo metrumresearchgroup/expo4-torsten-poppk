@@ -1,0 +1,262 @@
+---
+title: "Model Diagnostics"
+subtitle: > 
+  Goodness-of-fit diagnostics with focus on posterior predictive checking
+#image: bbr-strip.png
+order: 500
+categories: 
+- diagnostics
+- post processing
+fig-cap-location: margin
+toc: true
+toc-depth: 2
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  cache = TRUE, 
+  autodep = TRUE, 
+  comment = '.', 
+  message = FALSE,
+  warning = FALSE,
+  out.width = 500, 
+  out.height = 750
+)
+```
+
+# Introduction
+
+<hr />
+
+The Markov Chain Monte Carlo (MCMC) diagnostics presented in the previous section assess whether the posterior distributions of the model parameters are characterized with sufficient fidelity. If so, we can then assess the goodness-of-fit (GOF) of the model to the data which is the focus of this section. We focus on the use of posterior predictive checking (PPC)---the Bayesian (Bayes) approach to visual predictive checks (VPCs). 
+
+# Tools used
+
+<hr />
+
+## MetrumRG packages
+
+<!--# {{< var used.yspec >}} -->
+<!--# {{< var used.pmplots >}} -->
+{{< var used.bbr >}}
+{{< var used.bbrbayes >}}
+<!--# {{< var used.mrgmisc >}} -->
+
+## CRAN packages
+
+{{< var used.bayesplot >}}
+{{< var used.posterior >}}
+{{< var used.tidyvpc >}}
+{{< var used.tidybayes >}}
+
+# Set up
+
+<hr />
+
+Load required packages and set file paths to your model and figure directories.
+
+```{r}
+library(bbr)
+library(bbr.bayes)
+library(tidyverse)
+library(here)
+library(tidybayes)
+library(bayesplot)
+library(tidyvpc)
+
+MODEL_DIR <- here("model", "stan")
+FIGURE_DIR <- here("deliv", "figure")
+
+bayesplot::color_scheme_set('viridis')
+theme_set(theme_bw())
+
+```
+
+# Get the model output
+
+Read in the output from our first base model, ppkexpo1. This is done using the `read_fit_model` function from {{< var tools.bbrbayes >}} which returns a CmdStanMCMC object, providing several methods for querying the fitting results. For example, `fit$draws()` returns a draws array containing the MCMC samples.
+
+```{r}
+model_name <- "ppkexpo1"
+mod <- read_model(here(MODEL_DIR, model_name))
+fit <- read_fit_model(mod)
+
+```
+
+
+# PPCs for individuals
+
+We begin with PPCs, allowing us to compare model-predicted plasma concentrations to the observed values for each individual. The resulting plots depict 90% credible intervals (CI) for the model-predicted concentrations vs time overlayed with the observed values. Two types of model predictions are shown: "individual" represents predictions of new observations in the same individual and "population" predicts new observations in new patients with the same covariate values and dosing. These are Bayesian analogs of IPRED and PRED.
+
+```{r ppc_ind}
+load(file = here::here(dirname(get_data_path(mod)), "data1.RData"))
+loq <- 10
+
+data2 <- data1 %>%
+  mutate(DV = if_else(EVID == 1, NA_real_, DV),
+         DV = if_else(BLQ == 1, NA_real_, DV))
+
+pred <- spread_draws(fit, 
+                     cPred[num], 
+                     cPredNew[num]) %>%
+  mutate(cPred = ifelse(cPred < loq, NA_real_, cPred),
+         cPredNew = ifelse(cPredNew < loq, NA_real_, cPredNew)) %>%
+  group_by(num) %>%
+  summarize(lb = quantile(cPred, probs = 0.05, na.rm = TRUE),
+            median = quantile(cPred, probs = 0.5, na.rm = TRUE),
+            ub = quantile(cPred, probs = 0.95, na.rm = TRUE),
+            lbNew = quantile(cPredNew, probs = 0.05, na.rm = TRUE),
+            medianNew = quantile(cPredNew, probs = 0.5, na.rm = TRUE),
+            ubNew = quantile(cPredNew, probs = 0.95, na.rm = TRUE)) %>%
+  left_join(data2 %>% mutate(num = 1:n()))
+
+nPerPage <- 16
+studies <- unique(data2$STUDY)
+ppc_ind <- lapply(studies,
+              function(thisStudy){
+                predStudy <- pred %>%
+                  filter(STUDY == thisStudy)
+                ids <- unique(predStudy %>% dplyr::pull(ID))
+                nId <- length(ids)
+                nPages <- ceiling(nId / nPerPage)
+                ids <- data.frame(ID = ids,
+                                  page = sort(rep(1:nPages, length = nId)),
+                                  stringsAsFactors = FALSE)
+                predStudy <- predStudy %>%
+                  left_join(ids)
+                lapply(1:nPages,
+                       function(thisPage){
+                         predPage <- predStudy %>% filter(page == thisPage)
+                         ggplot(predPage, 
+                                aes(x = TIME, y = DV)) +
+                           geom_line(aes(x = TIME, y = medianNew, 
+                                         color = "population")) +
+                           geom_ribbon(aes(ymin = lbNew, ymax = ubNew, 
+                                           fill = "population"), 
+                                       alpha = 0.25) +
+                           geom_line(aes(x = TIME, y = median, 
+                                         color = "individual")) +
+                           geom_ribbon(aes(ymin = lb, ymax = ub, 
+                                           fill = "individual"), 
+                                       alpha = 0.25) +
+                           scale_color_brewer(name  ="prediction",
+                                              breaks=c("individual", "population"),
+                                              palette = "Set1") +
+                           scale_fill_brewer(name  ="prediction",
+                                             breaks=c("individual", "population"),
+                                             palette = "Set1") +
+                           geom_point(na.rm = TRUE) +
+                           scale_y_log10() +
+                           labs(title = paste("Study:", thisStudy),
+                                x = "time (h)",
+                                y = "plasma drug concentration (mg/L)") +
+                           theme(text = element_text(size = 12),
+                                 axis.text = element_text(size = 8),
+                                 legend.position = "bottom",
+                                 strip.text = element_text(size = 8)) +
+                           facet_wrap(~ ID)
+                       })
+              })
+
+```
+
+```{r}
+#| label: fig-ppc_ind-ppkexpo1
+#| fig-cap: Posterior predictive check for each individual using model ppkexpo1.
+#| out-width: 100%
+
+# show plot in HTML output
+ppc_ind
+```
+
+# PPCs for each study
+
+PPCs comparing the posterior distributions of landmark statistics (e.g., percentiles like the median and the 5th and 95th percentiles), with the corresponding statistics for the observed data, provide a better assessment of the overall predictive performance of the model. The following code generates such PPCs for each or the four studies in our dataset.
+
+```{r ppc_study, cache.lazy = FALSE}
+
+pred2 <- spread_draws(fit, 
+                     cPredNew[num]) %>%
+  mutate(cPredNew = ifelse(cPredNew < loq, NA_real_, cPredNew)) %>%
+  left_join(data2 %>% mutate(num = 1:n())) %>%
+  mutate(cPredNew = ifelse(EVID == 1 | TIME == 0, NA_real_, cPredNew))
+
+ppc_all <- observed(data2, x = TIME, y = DV) %>%
+  simulated(pred2 %>% arrange(.draw, num), y = cPredNew) %>% 
+  stratify(~ STUDY) %>% 
+  binning(bin = 'jenks', nbins = 10) %>% 
+  vpcstats()
+```
+
+```{r}
+#| label: fig-ppc_study-ppkexpo1
+#| fig-cap: Posterior predictive check for model ppkexpo1.
+#| out-width: 100%
+
+plot(ppc_all, legend.position = "top", 
+     color = c("steelblue3", "grey60", "steelblue3"),
+     linetype = c("dashed", "solid", "dashed"),
+     ribbon.alpha = 0.5) + 
+  scale_y_log10() +
+  labs(x = "time (h)",
+       y = "plasma drug concentration (mg/L)")
+
+```
+
+# PPCs for fraction of BLQs
+
+This is a predictive check of the fraction of observations that are below the limit of quantification (BLQ) versus time. We take just the single dose studies and limit the analysis out to 100 hours after the dose.
+
+
+```{r}
+
+pred3 <- spread_draws(fit, 
+                     cPredNew[num]) %>%
+  left_join(data2 %>% mutate(num = 1:n())) %>%
+  mutate(BLQsim = ifelse(cPredNew < loq, 1, 0),
+         BLQsim = ifelse(EVID == 0, BLQsim, NA_integer_)) %>% 
+  filter(STUDY %in% c("101-DEMO-001", "201-DEMO-004"),
+         TIME <= 100)
+
+data3 <- data2 %>%
+  filter(STUDY %in% c("101-DEMO-001", "201-DEMO-004"),
+         TIME <= 100)
+
+ppc_blq <- observed(data3, x = TIME, y = BLQ) %>%
+  simulated(pred3 %>% arrange(.draw, num), y = BLQsim) %>% 
+  stratify(~ STUDY) %>% 
+  binning(bin = 'jenks', nbins = 10) %>% 
+  vpcstats(vpc.type = "categorical")
+
+## Change factor labels to make more readable
+ppc_blq$stats <- ppc_blq$stats %>%
+  mutate(pname = factor(pname, labels = c(">= LOQ", "< LOQ")))
+
+```
+
+```{r}
+#| label: fig-ppc_blq-ppkexpo1
+#| fig-cap: Posterior predictive check of the the fraction of observations that are BLQ for model ppkexpo1.
+#| out-width: 100%
+
+plot(ppc_blq, legend.position = "top",
+     ribbon.alpha = 0.5,
+     xlab = "time (h)",
+     ylab = "fraction above or below LOQ")
+
+```
+
+
+
+
+
+# Other resources 
+<hr/>
+
+The following script from the {{< var public_expo_repo.main >}} is discussed on this page. If you're interested running this code, visit the {{< var pages.about_the_repo >}} page first.
+
+Model Diagnostics script: {{< var public_expo_repo.model_diagnostics >}}
+
+
+

@@ -1,0 +1,581 @@
+---
+title: "Update Model"
+subtitle: > 
+  Model revision workflow with bbr.bayes. 
+#image: bbr-strip.png
+order: 500
+categories: 
+- bbr
+- bbr.bayes
+- model management
+fig-cap-location: margin
+toc: true
+toc-depth: 2
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  cache = TRUE, 
+  autodep = TRUE, 
+  comment = '.', 
+  message = FALSE,
+  warning = FALSE,
+  out.width = 500, 
+  out.height = 750
+)
+```
+
+# Introduction
+
+This page demonstrates an iterative, population pharmacokinetic (popPK) model development process using `bbr` and `bbr.bayes` consisting of a sequence of four models which includes  ppkexpo1 implemented in the "Initial Model" section. While this is an oversimplification of a typical model development process, it is sufficient to illustrate key aspects of the use of the Metrum Reasearch Group (MetrumRG) Ecosystem (MERGE) tools for iterative model development. 
+
+All models share both the linear two compartment model with first order absorption and lognormal residual variation.
+
+The sequence of four models is as follows:
+
+1. ppkexpo1
+* no individual-specific covariates
+* centered random effect parameterization
+
+2. ppkexpo2
+* no individual-specific covariates
+* non-centered random effect parameterization
+
+3. ppkexpo3
+* allometric scaling with fixed exponents on body weight
+* non-centered random effect parameterization
+
+4. ppkexpo4
+* allometric scaling with fixed exponents on body weight
+* additional covariates: eGFR, age, albumin
+* non-centered random effect parameterization
+
+# Tools used
+
+<hr />
+
+## MetrumRG packages
+{{< var used.bbr >}}
+{{< var used.bbrbayes >}}
+
+## CRAN packages
+{{< var used.dplyr >}}
+{{< var used.bayesplot >}}
+{{< var used.posterior >}}
+{{< var used.tidyvpc >}}
+{{< var used.tidybayes >}}
+
+# Set up
+
+<hr />
+
+Load required packages and set file paths to your model and figure directories. 
+
+```{r}
+library(bbr)
+library(bbr.bayes)
+library(dplyr)
+library(here)
+library(tidyverse)
+library(yspec)
+library(cmdstanr)
+library(tidyvpc)
+library(posterior)
+library(bayesplot)
+library(tidybayes)
+library(tidyvpc)
+library(loo)
+library(glue)
+library(kableExtra)
+
+set_cmdstan_path(path = here("Torsten", "v0.91.0", "cmdstan"))
+
+MODEL_DIR <- here("model", "stan")
+FIGURE_DIR <- here("deliv", "figure")
+
+## load tags}
+TAGS <- yaml::read_yaml(here("script", "tags.yaml"))
+```
+
+
+```{r, echo=FALSE}
+
+bayesplot::color_scheme_set('viridis')
+theme_set(theme_bw())
+
+# Source some useful functions
+source(here("script", "mcmc-diagnostic-functions.R"))
+
+```
+
+# Model creation and submission
+
+<hr />
+
+Read in the base model (ppkexpo1). We will revise it to generate our revised model.
+
+```{r read_ppkexpo1}
+ppkexpo1 <- read_model(here(MODEL_DIR, "ppkexpo1"))
+```
+
+
+## Revised model---non-centered parameterization 
+
+ppkexpo1 provided a small divergent transition value. Let's try improving sampling performance by changing from a centered parameterization to a non-centered one. Copy ppkexpo1 and revise it.
+
+```{r setup_ppkexpo2, eval = TRUE}
+ppkexpo2 <- copy_model_from(ppkexpo1, "ppkexpo2", .inherit_tags = TRUE, 
+                      .overwrite = TRUE) %>%
+  replace_tag(TAGS$CP, TAGS$NCP) %>%
+  add_description("Base popPK model with non-centered parameterization")
+```
+
+Now, manually edit `ppkexpo2.stan` and `ppkexpo2-init.R` to implement a non-centered parameterization. For this demo, copy the previously created files from the demo folder.
+
+```{r setup2_ppkexpo2, eval = TRUE}
+ppkexpo2 <- ppkexpo2 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo2.stan")) %>%
+  add_staninit_file(here(MODEL_DIR, "demo", "ppkexpo2-init.R"))
+```
+
+Here is the revised Stan model implementing the two compartmental popPK model with a non-centered parameterization. With this parameterization, the individual PK parameters are not sampled directly from a multivariate normal distribution. Instead, standard normal, random variables are sampled; and the multivariate normal, PK parameters are constructed using some matrix algebra, including the Cholesky decomposition of the correlation matrix.
+
+```{r, echo=FALSE}
+ppkexpo2 <- read_model(here(MODEL_DIR, "ppkexpo2"))
+cat(readLines(get_model_path(ppkexpo2)), sep = "\n")
+```
+
+We can compare two model files using the `model_diff` command. By default, the current model is compared to the model which it is based on (in this case, ppkexpo1). 
+
+```{r}
+model_diff(ppkexpo2)
+```
+
+
+
+## ppkexpo2: Submit the model
+
+```{r fit_ppkexpo2, eval = TRUE}
+## Set cmdstanr arguments
+ppkexpo2 <- ppkexpo2 %>%
+  set_stanargs(list(iter_warmup = 500,
+                    iter_sampling = 500,
+                    thin = 1,
+                    chains = 4,
+                    parallel_chains = 4,
+##                    refresh = 10,
+                    seed = 1234,
+                    save_warmup = FALSE),
+               .clear = TRUE)
+
+## Check that the necessary files are present
+check_stan_model(ppkexpo2)
+
+## Fit the model using Stan
+ppkexpo2_fit <- ppkexpo2 %>% submit_model(.overwrite = TRUE)
+
+```
+
+## ppkexpo2: Parameter summary and sampling diagnostics
+
+```{r}
+model_name <- "ppkexpo2"
+mod <- read_model(here(MODEL_DIR, model_name))
+fit <- read_fit_model(mod)
+
+fit$cmdstan_diagnose()
+
+pars <- c("lp__", "CLHat", "QHat", "V2Hat", "V3Hat", "kaHat",
+          "sigma", glue("omega[{1:5}]"),
+          paste0("rho[", matrix(apply(expand.grid(1:5, 1:5),
+                                      1, paste, collapse = ","),
+                                ncol = 5)[upper.tri(diag(5), 
+                                                    diag = FALSE)], "]"))
+# Get posterior samples for parameters of interest
+posterior <- fit$draws(variables = pars)
+# Get quantities related to NUTS performance, e.g., occurrence of
+# divergent transitions
+np <- nuts_params(fit) 
+
+n_iter <- dim(posterior)[1]
+n_chains <- dim(posterior)[2]
+
+ptable <- fit$summary(variables = pars) %>%
+  mutate(across(-variable, ~ pmtables::sig(.x, maxex = 4))) %>% 
+  rename(parameter = variable) %>%
+  mutate("90% CI" = paste("(", q5, ", ", q95, ")", 
+                          sep = "")) %>%
+  select(parameter, mean, median, sd, mad, "90% CI", ess_bulk, ess_tail, rhat)
+
+ptable %>% 
+  kable %>%
+  kable_styling()
+```
+
+## Trace and density plots
+
+Next, we look at the trace and density plots.
+
+```{r}
+mcmc_history_plots <- mcmc_history(posterior,
+                                  nParPerPage = 6, 
+                                  np = np)
+```
+
+
+```{r}
+#| label: fig-trace-ppkexpo2
+#| fig-cap: MCMC trace plots for model ppkexpo2.
+#| out-width: 100%
+mcmc_history_plots
+```
+
+
+
+```{r}
+  mcmc_density_chain_plots <- mcmc_density(posterior, 
+                                           nParPerPage = 6, byChain = TRUE)
+```
+
+```{r}
+#| label: fig-density-ppkexpo2
+#| fig-cap: MCMC density plots for model ppkexpo2.
+#| out-width: 100%
+mcmc_density_chain_plots
+```
+The non-centered parameterization substantially improved the sampling performance and eliminated the divergent transitions. 
+
+## Revised model---incorporate allometric scaling
+
+Now, let's start to incorporate covariates. For ppkexpo3, we add allometric scaling to the clearance and volume parameters. The model revision process proceeds as before except now we build on ppkexpo2 instead of ppkexpo1. 
+
+```{r setup_ppkexpo3, eval = TRUE}
+ppkexpo3 <- copy_model_from(ppkexpo2, "ppkexpo3", .inherit_tags = TRUE, 
+                      .overwrite = TRUE) %>%
+  add_tags(TAGS$allometric) %>%
+  add_description("PopPK model: ppkexpo2 + allometric scaling")
+```
+
+Now, manually edit `ppkexpo3.stan` and `ppkexpo3-standata.R` to implement allometric scaling and add body weight to the data set.
+
+For this demo, we'll copy previously created files from the demo folder.
+
+```{r setup2_ppkexpo3, eval = TRUE}
+ppkexpo3 <- ppkexpo3 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo3.stan")) %>%
+  add_standata_file(here(MODEL_DIR, "demo", "ppkexpo3-standata.R"))
+```
+
+Here is the revised Stan model with allometric scaling.
+
+```{r, echo=FALSE}
+ppkexpo3 <- read_model(here(MODEL_DIR, "ppkexpo3"))
+cat(readLines(get_model_path(ppkexpo3)), sep = "\n")
+```
+
+## ppkexpo3: Submit the model
+
+```{r fit_ppkexpo3, eval = TRUE}
+## Set cmdstanr arguments
+ppkexpo3 <- ppkexpo3 %>%
+  set_stanargs(list(iter_warmup = 500,
+                    iter_sampling = 500,
+                    thin = 1,
+                    chains = 4,
+                    parallel_chains = 4,
+##                    refresh = 10,
+                    seed = 1234,
+                    save_warmup = FALSE),
+               .clear = TRUE)
+
+## Check that the necessary files are present
+check_stan_model(ppkexpo3)
+
+## Fit the model using Stan
+ppkexpo3_fit <- ppkexpo3 %>% submit_model(.overwrite = TRUE)
+```
+
+## ppkexpo3: Parameter summary and sampling diagnostics
+
+```{r}
+model_name <- "ppkexpo3"
+mod <- read_model(here(MODEL_DIR, model_name))
+fit <- read_fit_model(mod)
+
+fit$cmdstan_diagnose()
+
+pars <- c("lp__", "CLHat", "QHat", "V2Hat", "V3Hat", "kaHat",
+          "sigma", glue("omega[{1:5}]"),
+          paste0("rho[", matrix(apply(expand.grid(1:5, 1:5),
+                                      1, paste, collapse = ","),
+                                ncol = 5)[upper.tri(diag(5), 
+                                                    diag = FALSE)], "]"))
+# Get posterior samples for parameters of interest
+posterior <- fit$draws(variables = pars)
+# Get quantities related to NUTS performance, e.g., occurrence of
+# divergent transitions
+np <- nuts_params(fit) 
+
+n_iter <- dim(posterior)[1]
+n_chains <- dim(posterior)[2]
+
+ptable <- fit$summary(variables = pars) %>%
+  mutate(across(-variable, ~ pmtables::sig(.x, maxex = 4))) %>% 
+  rename(parameter = variable) %>%
+  mutate("90% CI" = paste("(", q5, ", ", q95, ")", 
+                          sep = "")) %>%
+  select(parameter, mean, median, sd, mad, "90% CI", ess_bulk, ess_tail, rhat)
+
+ptable %>% 
+  kable %>%
+  kable_styling()
+```
+
+## Trace and density plots
+
+Next, we look at the trace and density plots.
+
+```{r}
+mcmc_history_plots <- mcmc_history(posterior,
+                                  nParPerPage = 6, 
+                                  np = np)
+```
+
+
+```{r}
+#| label: fig-trace-ppkexpo3
+#| fig-cap: MCMC trace plots for model ppkexpo3.
+#| out-width: 100%
+mcmc_history_plots
+```
+
+
+
+```{r}
+  mcmc_density_chain_plots <- mcmc_density(posterior, 
+                                           nParPerPage = 6, byChain = TRUE)
+```
+
+```{r}
+#| label: fig-density-ppkexpo3
+#| fig-cap: MCMC density plots for model ppkexpo3.
+#| out-width: 100%
+mcmc_density_chain_plots
+```
+
+There is little or no decrease in the overall log probability (`lp__`), which suggests the addition of allometric scaling did not markedly improve the model fit. `lp__` is a relatively crude metric for model comparison. We'll discuss better metrics in a subsequent section. The sampling performance deteriorated somewhat comparatively to ppkexpo2, particularly with respect to $\widehat{CL}$.
+
+## Revised model---incorporate additional covariates
+
+Let's incorporate additional covariate effects. Specifically, we add effects of eGFR, age, and albumin on clearance (CL).
+
+```{r setup_ppkexpo4,eval = TRUE}
+ppkexpo4 <- copy_model_from(ppkexpo3, "ppkexpo4", .inherit_tags = TRUE, 
+                      .overwrite = TRUE) %>%
+  add_tags(with(TAGS, c(EGFR_CL, age_CL, albumin_CL))) %>%
+  add_description("PopPK model: ppkexpo3 + allometric scaling & effects of EGFR, age, and albumin in CL")
+```
+
+Now, manually edit `ppkexpo4.stan` and `ppkexpo4-standata.R` to implement the effects of eGFR, age, and albumin on CL, and add those covariates to the data set. We also need to revise the initial estimates to include coefficients for these additional covariates.
+
+For this demo, copy the previously created files from the demo folder.
+
+```{r setup2_ppkexpo4,eval = TRUE}
+ppkexpo4 <- ppkexpo4 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo4.stan")) %>%
+  add_standata_file(here(MODEL_DIR, "demo", "ppkexpo4-standata.R")) %>%
+  add_staninit_file(here(MODEL_DIR, "demo", "ppkexpo4-init.R"))
+```
+
+Here is the Stan model incorporating the effects of eGFR, age, and albumin on CL.
+
+```{r, echo=FALSE}
+ppkexpo4 <- read_model(here(MODEL_DIR, "ppkexpo4"))
+cat(readLines(get_model_path(ppkexpo4)), sep = "\n")
+```
+
+## ppkexpo4: Submit the model
+
+```{r fit_ppkexpo4,eval = TRUE}
+## Set cmdstanr arguments
+ppkexpo4 <- ppkexpo4 %>%
+  set_stanargs(list(iter_warmup = 500,
+                    iter_sampling = 500,
+                    thin = 1,
+                    chains = 4,
+                    parallel_chains = 4,
+##                    refresh = 10,
+                    seed = 1234,
+                    save_warmup = FALSE),
+               .clear = TRUE)
+
+## Check that the necessary files are present
+check_stan_model(ppkexpo4)
+
+## Fit the model using Stan
+ppkexpo4_fit <- ppkexpo4 %>% submit_model(.overwrite = TRUE)
+```
+
+## ppkexpo4: Parameter summary and sampling diagnostics
+
+```{r}
+model_name <- "ppkexpo4"
+mod <- read_model(here(MODEL_DIR, model_name))
+fit <- read_fit_model(mod)
+
+fit$cmdstan_diagnose()
+
+pars <- c("lp__", "CLHat", "QHat", "V2Hat", "V3Hat", "kaHat",
+          "EGFR_CL", "age_CL", "albumin_CL",
+          "sigma", glue("omega[{1:5}]"),
+          paste0("rho[", matrix(apply(expand.grid(1:5, 1:5),
+                                      1, paste, collapse = ","),
+                                ncol = 5)[upper.tri(diag(5), 
+                                                    diag = FALSE)], "]"))
+# Get posterior samples for parameters of interest
+posterior <- fit$draws(variables = pars)
+# Get quantities related to NUTS performance, e.g., occurrence of
+# divergent transitions
+np <- nuts_params(fit) 
+
+n_iter <- dim(posterior)[1]
+n_chains <- dim(posterior)[2]
+
+ptable <- fit$summary(variables = pars) %>%
+  mutate(across(-variable, ~ pmtables::sig(.x, maxex = 4))) %>% 
+  rename(parameter = variable) %>%
+  mutate("90% CI" = paste("(", q5, ", ", q95, ")", 
+                          sep = "")) %>%
+  select(parameter, mean, median, sd, mad, "90% CI", ess_bulk, ess_tail, rhat)
+
+ptable %>% 
+  kable %>%
+  kable_styling()
+```
+
+## Trace and density plots
+
+Next, we look at the trace and density plots.
+
+```{r}
+mcmc_history_plots <- mcmc_history(posterior,
+                                  nParPerPage = 6, 
+                                  np = np)
+```
+
+
+```{r}
+#| label: fig-trace-ppkexpo4
+#| fig-cap: MCMC trace plots for model ppkexpo4.
+#| out-width: 100%
+mcmc_history_plots
+```
+
+
+
+```{r}
+  mcmc_density_chain_plots <- mcmc_density(posterior, 
+                                           nParPerPage = 6, byChain = TRUE)
+```
+
+```{r}
+#| label: fig-density-ppkexpo4
+#| fig-cap: MCMC density plots for model ppkexpo4.
+#| out-width: 100%
+mcmc_density_chain_plots
+```
+
+The overall log probability (`lp__`) has decreased relatively to ppkexpo3, suggesting some improvement in the model fit. As noted before, we discuss better metrics in a subsequent section. The sampling performance in this model is also more refined than in ppkexpo3. 
+
+## Model evaluation
+
+Let's assess the ppkexpo4 model fit using posterior predictive checking.
+
+```{r ppc_study, cache.lazy = FALSE}
+
+load(file = here::here(dirname(get_data_path(mod)), "data1.RData"))
+loq <- 10
+
+data2 <- data1 %>%
+  mutate(DV = if_else(EVID == 1, NA_real_, DV),
+         DV = if_else(BLQ == 1, NA_real_, DV))
+
+pred2 <- spread_draws(fit, 
+                     cPredNew[num]) %>%
+  mutate(cPredNew = ifelse(cPredNew < loq, NA_real_, cPredNew)) %>%
+  left_join(data2 %>% mutate(num = 1:n())) %>%
+  mutate(cPredNew = ifelse(EVID == 1 | TIME == 0, NA_real_, cPredNew))
+
+ppc_all <- observed(data2, x = TIME, y = DV) %>%
+  simulated(pred2 %>% arrange(.draw, num), y = cPredNew) %>% 
+  stratify(~ STUDY) %>% 
+  binning(bin = 'jenks', nbins = 10) %>% 
+  vpcstats()
+
+```
+
+```{r}
+#| label: fig-ppc-ppkexpo4
+#| fig-cap: Posterior predictive check for model ppkexpo4.
+#| out-width: 100%
+
+plot(ppc_all, legend.position = "top", 
+     color = c("steelblue3", "grey60", "steelblue3"),
+     linetype = c("dashed", "solid", "dashed"),
+     ribbon.alpha = 0.5) + 
+  scale_y_log10() +
+  labs(x = "time (h)",
+       y = "plasma drug concentration (mg/L)")
+
+```
+
+# PPCs for fraction of BLQs
+
+This is a predictive check of the fraction of observations that are below the limit of quantification (BLQ) versus time. We take the single dose studies and limit the analysis out to 100 hours after the dose. 
+
+```{r}
+
+pred3 <- spread_draws(fit, 
+                     cPredNew[num]) %>%
+  left_join(data2 %>% mutate(num = 1:n())) %>%
+  mutate(BLQsim = ifelse(cPredNew < loq, 1, 0),
+         BLQsim = ifelse(EVID == 0, BLQsim, NA_integer_)) %>% 
+  filter(STUDY %in% c("101-DEMO-001", "201-DEMO-004"),
+         TIME <= 100)
+
+data3 <- data2 %>%
+  filter(STUDY %in% c("101-DEMO-001", "201-DEMO-004"),
+         TIME <= 100)
+
+ppc_blq <- observed(data3, x = TIME, y = BLQ) %>%
+  simulated(pred3 %>% arrange(.draw, num), y = BLQsim) %>% 
+  stratify(~ STUDY) %>% 
+  binning(bin = 'jenks', nbins = 10) %>% 
+  vpcstats(vpc.type = "categorical")
+
+## Change factor labels to make more readable
+ppc_blq$stats <- ppc_blq$stats %>%
+  mutate(pname = factor(pname, labels = c(">= LOQ", "< LOQ")))
+
+```
+
+```{r}
+#| label: fig-ppc_blq-ppkexpo4
+#| fig-cap: Posterior predictive check of the the fraction of observations that are BLQ for model ppkexpo4.
+#| out-width: 100%
+
+plot(ppc_blq, legend.position = "top",
+     ribbon.alpha = 0.5,
+     xlab = "time (h)",
+     ylab = "fraction above or below LOQ")
+
+```
+
+
+# Other resources
+ <hr /> 
+ 
+The following script from the {{< var public_expo_repo.main >}} is discussed on this page. If you're interested running this code, visit the {{< var pages.about_the_repo >}} page first.
+
+Update Model script: {{< var public_expo_repo.update_model >}} 

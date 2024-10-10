@@ -1,0 +1,292 @@
+---
+title: "Initial Model"
+subtitle: > 
+  Example model submission workflow with `bbr.bayes` 
+#image: bbr-strip.png
+order: 500
+categories: 
+- bbr
+- bbr.bayes
+- model management
+fig-cap-location: margin
+toc: true
+toc-depth: 2
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  cache = TRUE, 
+  autodep = TRUE, 
+  comment = '.', 
+  message = FALSE,
+  warning = FALSE,
+  out.width = 500, 
+  out.height = 750
+)
+```
+
+# Introduction
+
+Managing the model development processes in a traceable and reproducible manner can be a significant challenge. At Metrum Research Group (MetrumRG), we use `bbr` and `bbr.bayes` to streamline this process for fitting Bayesian (Bayes) models. `bbr` and `bbr.bayes` are R packages developed by MetrumRG that serve three primary purposes:
+
+* Create and submit Stan or NONMEM® models for execution in parallel and/or on a high-performance compute (HPC) cluster (e.g., {{< var pages.about_metworx >}})
+* Parse Stan or NONMEM® outputs into R objects to facilitate model evaluation and diagnostics in R
+* Annotate the model development process for easier and more reliable traceability and reproducibility
+
+This page demonstrates the following `bbr` and `bbr.bayes` functionality:
+
+* Create an initial Stan/Torsten population pharmacokinetics (popPK) model
+* Submit that model
+
+# Tools used
+
+<hr />
+
+## MetrumRG packages
+{{< var used.bbr >}}
+{{< var used.bbrbayes >}}
+
+## CRAN packages
+{{< var used.dplyr >}}
+
+# Outline
+
+<hr />
+
+This page details a range of tasks frequently performed throughout the modeling process such as defining, submitting, and annotating models. Typically, our scientists run this code in a scratch pad style script since it isn't necessary for the entire coding history for each model to persist. Here, the code used each step of the process is provided as a reference, and a runnable version of this page is available in our GitHub repository:  {{< var public_expo_repo.init_model_submission >}}. 
+
+If you're a new `bbr.bayes` user, we recommend you read through the {{< var pkg_resource.bbrbayes_getting_started >}} before trying to run any code. This vignette includes some setup and configuration requirement (e.g., making sure `bbr.bayes` can find your Torsten installation). 
+
+Please note, **`bbr.bayes` doesn't edit the model structure in your Stan code.** This page walks through a sequence of models that might evolve during a simple modeling project. All modifications to the Stan code are made directly by the modeler. Below, we've included comments asking you to edit your Stan code manually. 
+
+# Set up
+
+<hr />
+
+Load required packages and set file paths to your model and figure directories. 
+
+```{r}
+library(bbr)
+library(bbr.bayes)
+library(dplyr)
+library(here)
+library(tidyverse)
+library(yspec)
+library(cmdstanr)
+
+set_cmdstan_path(path = here("Torsten", "v0.91.0", "cmdstan"))
+
+MODEL_DIR <- here("model", "stan")
+FIGURE_DIR <- here("deliv", "figure")
+```
+
+# Initial model creation and submission
+
+<hr />
+
+## Create a model object
+
+We begin with a fairly simple popPK model called ppkexpo1: 
+
+- linear two compartment model with first order absorption,
+- no individual-specific covariates,
+- centered random effect parameterization, and
+- lognormal residual variation.
+
+To begin modeling, first create a model object using `new_model()`. 
+
+```{r, eval = TRUE}
+ppkexpo1 <- new_model(here(MODEL_DIR, "ppkexpo1"), 
+                      .model_type = "stan",
+                      .overwrite = TRUE)
+```
+
+This generates an S3 object which you pass to all of the other `bbr` functions that submit, summarize, or manipulate models. The first argument (`.path`) must be the path to a directory that will contain the necessary files. For Stan models, you have to add `.model_type = "stan"` to the `new_model()` call. The above `new_model()` statement creates a new model folder named ppkexpo1 (unless it already exists) and populates it with templates for the following files:
+
+- `ppkexpo1.stan`: Stan language model
+- `ppkexpo1-standata.R`: function to generate Stan-formatted data list
+- `ppkexpo1-init.R`: function to generate initial estimates
+- `ppkexpo1-stanargs.R`: list of `cmdstan` arguments
+
+A `ppkexpo1.yaml` file is also created in your model directory; this file automatically persists any tags, notes, and other model metadata. While it's useful to know that this `.yaml` file exists, you shouldn't need to interact with it directly (i.e., in the RStudio file tabs). Instead, `bbr` has a variety of functions (e.g., `add_tags()` and `add_notes()` shown below) that work with the model object to edit the information in the `.yaml` file from your R console. 
+
+The roles of the template files created by `new_model()` are likely self-evident from their names, but a bit more information about their inputs and outputs is provided below:
+
+- `<run>.stan` is a file containing the Stan model code.
+
+- `<run>-standata.R`  constructs a function returning a Stan-ready data object which is then passed to the `CmdStanModel$sample()` call. You can use the `build_data()` function to view the data object created by the function.
+
+- `<run>-stanargs.R` constructs a named list with all of the arguments that will be passed to the `CmdStanModel$sample()` call. See `set_stanargs()` for details on modifying.
+
+- `<run>-init.R` is a file which contains all necessary R code to create the initial values passed to the `CmdStanModel$sample()` call. 
+
+## Edit or replace the `.stan`, `-standata.R`, and `-init.R` files
+
+Now, you may manually edit the `.stan`, `-standata.R`, and `-init.R` files by using the `bbr.bayes` `open_stanmod_file`, `open_standata_file`, and `open_staninit_file` functions.  Alternatively, if you've already created any of those files, you may copy then use the `add_stan_file`, `add_standata_file`, or `add_stan_init` functions. This is demonstrated below using files from the "demo" folder.
+
+```{r, eval = TRUE}
+ppkexpo1 <- ppkexpo1 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo1.stan")) %>%
+  add_standata_file(here(MODEL_DIR, "demo", "ppkexpo1-standata.R")) %>%
+  add_staninit_file(here(MODEL_DIR, "demo", "ppkexpo1-init.R"))
+```
+
+Here is the Stan model implementing the two compartmental popPK model with a centered parameterization.
+
+```{r, echo=FALSE}
+ppkexpo1 <- read_model(here(MODEL_DIR, "ppkexpo1"))
+cat(readLines(get_model_path(ppkexpo1)), sep = "\n")
+```
+
+The `ppkexpo1-standata.R` file must create a function named `make_standata()` which takes the name of the directory the file is located as input and returns a list suitable for use with Stan. 
+
+```{r, echo=FALSE}
+cat(readLines(build_path_from_model(ppkexpo1, '-standata.R')), sep = "\n")
+```
+
+The `ppkexpo1-init.R` file defines how we want the initial values generated for each Markov Chain Monte Carlo (MCMC) chain. Here's how we constructed it for the `ppkexpo1` model.
+```{r, echo=FALSE}
+cat(readLines(build_path_from_model(ppkexpo1, '-init.R')), sep = "\n")
+```
+
+Lastly, we set the arguments for running the sampler. The only required argument is a random seed (for reproducibility). Other arguments, such as the number of cores, chains, warm-up iterations, adapt_delta parameter, etc., are optional. See the help file for `cmdstanr::sample` for a list of possible options. This populates the contents of the `ppkexpo1-stanargs.R` file.
+
+```{r}
+ppkexpo1 <- ppkexpo1 %>%
+  set_stanargs(list(iter_warmup = 500,
+                    iter_sampling = 500,
+                    thin = 1,
+                    chains = 4,
+                    parallel_chains = 4,
+                    seed = 1234,
+                    save_warmup = FALSE),
+               .clear = TRUE)
+
+```
+
+Here is the resulting `ppkexpo1-stanargs.R` file.
+
+```{r, echo=FALSE}
+cat(readLines(build_path_from_model(ppkexpo1,'-stanargs.R')), sep = "\n")
+```
+
+## Annotating your model
+
+<hr />
+
+`bbr` has some great features that allow you to easily annotate your models. This helps you document your modeling process as you go and can be easily retrieved later for creating run logs that describe the entire analysis (shown later). 
+
+A well-annotated model development process does several important things:
+
+* Makes it easy to update collaborators on the state of the project.
+* Supports reproducibility and traceability of your results.
+* Keeps the project organized in case you need to return to it at a later date.
+
+The `bbr` model object contains three annotation fields. The "description" is a character scalar (i.e., a single string), while "notes" and "tags" can contain character vectors of any length. These fields can be used for any purpose; however, we recommend the patterns below which have worked for us. These three fields can also be added to the model object at any time (before or after submitting the model). 
+
+### Using description
+
+Descriptions are typically brief; for example, "Base model" or "First covariate model". The "description" field defaults to NULL if no description is provided. One benefit of this approach is that you can easily filter your run logs to the notable models using `dplyr::filter(!is.null(description))`.
+
+We'll add a description denoting ppkexpo1 as the base popPK model.
+
+```{r, eval = TRUE}
+ppkexpo1 <- ppkexpo1 %>%
+  add_description("Base popPK model")
+```
+
+### Using notes
+
+Notes are often used for free text observations about a particular model. Some modelers leverage notes as official annotations which might get pulled into a run log for a final report of some kind, while other modelers prefer to keep them informal and use them primarily for their own reference.
+
+
+## Using tags
+
+In contrast to the "description" and "notes" fields, [`tags`](https://metrumresearchgroup.github.io/bbr/reference/modify_tags.html) can be used to document your modeling work in a more structured way. 
+
+While `bbr` accepts a character vector for all tag-related arguments and functions, we highly recommend defining a glossary of tags that can be used throughout the model development. Importantly, this glossary allows you to define a consistent series of tags, and it can be modified and added throughout the course of the project. Tags become useless if they are inconsistently used; for example, using both "Emax model" and "EMAX model" is an inconsistent tage which makes it difficult to easily identify all models with that structure. The use of an external glossary prevents this. This Expo repository contains a `tags.yaml` file with some example tags to demonstrate what this glossary might look like; however, we recommend customizing this for your own project.
+
+```{r load tags}
+TAGS <- yaml::read_yaml(here("script", "tags.yaml"))
+str(TAGS)
+```
+
+We demonstrate the benefit of using this tagging strategy when constructing run logs and summary tables later in this Expo on the {{< var pages.modeling_summary >}} page. We also demonstrate different functions for interacting with tags below but see [`?modify_tags`](https://metrumresearchgroup.github.io/bbr/reference/modify_tags.html) for details on each of these functions.
+
+#### Auto-complete for tags
+
+Pre-defining your tags and reading them into a named list, as shown above, allows you to use Rstudio's auto-complete feature. By typing `TAGS$`, you can see all available tags and, when you start typing part of the tag, the list will actively filter to the relevant tags. For instance, try typing `TAGS$eta` in the console to view the relevant tags with "eta" in them.
+
+#### Add tags to your model
+
+Here, we add a few relevant tags to this first model indicating a two compartment model with first order absorption, centered parameterization, lognormal interindividual variability (IIV) in CL, Q, V2, V3 and ka, and lognormal residual variability.
+
+```{r, eval = TRUE}
+ppkexpo1 <- ppkexpo1 %>%
+  add_tags(with(TAGS, 
+                c(two_cpt_abs,
+                  CP,
+                  logCL_normalIIV,
+                  logQ_normalIIV,
+                  logV2_normalIIV,
+                  logV3_normalIIV,
+                  logka_normalIIV,
+                  lognormal_ruv)))
+```
+
+Now, when you print your model object (ppkexpo1) to the console, or when you call `run_log()` (described later), you'll see your new tags. You can also see these tags persist in the `.yaml` file on disk.
+
+```{r}
+cat(readLines(file.path(MODEL_DIR, "ppkexpo1.yaml")), sep = "\n")
+```
+
+## Submit the model
+
+Now that you have created your model object, you can submit it to be run with `submit_model()`.
+
+```{r Fit ppkexpo1, eval = TRUE}
+## Check that the necessary files are present
+check_stan_model(ppkexpo1)
+
+## Fit the model using Stan
+ppkexpo1_fit <- ppkexpo1 %>% submit_model(.overwrite = TRUE)
+```
+
+The `submit_model` function will compile the Stan model and run the MCMC sampler, return a CmdStanMCMC object, and write the MCMC samples to the `<run>/<run>-output` directory as `.csv` files (one per chain). Additionally, `submit_model` saves an `.RDS` file containing all of the CmdStanMCMC object elements except the samples.
+
+If the model has already been fitted, you can read it using the following
+statements without having to refit the model.
+
+```{r read_ppkexpo1}
+ppkexpo1 <- read_model(here(MODEL_DIR, "ppkexpo1"))
+ppkexpo1_fit <- read_fit_model(ppkexpo1)
+```
+
+We can look at some simple summaries working directly with the CmdStanMCMC object. For example, the `cmdstan_diagnose` slot provides a quick assessment of model diagnostics,
+
+```{r}
+ppkexpo1_fit$cmdstan_diagnose()
+```
+
+and the `summary` slot provides a quick summary of the parameter distributions, split Rhat and effective sample sizes:
+
+```{r}
+ppkexpo1_fit$summary(variables=c("CLHat", "QHat", "V2Hat", "V3Hat",
+                                 "kaHat", "omega", "sigma")) %>% 
+  mutate(across(-variable,  pmtables::sig))
+```
+
+Finally, add a note documenting our initial assessment of MCMC convergence.
+
+```{r, eval = TRUE}
+ppkexpo1 <- ppkexpo1 %>% 
+  add_notes("Initial assessment of convergence based on R-hat looks good except for some elements of Omega.")
+```
+
+# Other resources
+ <hr /> 
+ 
+The following script from the {{< var public_expo_repo.main >}} is discussed on this page. If you're interested running this code, visit the {{< var pages.about_the_repo >}} page first.
+
+Initial Model Submission script: {{< var public_expo_repo.init_model_submission >}} 

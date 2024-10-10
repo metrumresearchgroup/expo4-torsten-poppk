@@ -1,0 +1,54 @@
+--- 
+title: "Installing Torsten"
+subtitle: | 
+  Using the bbr.bayes `install_torsten()` function
+order: 10000
+categories: 
+- Torsten
+tbl-colwidths: [25,20, 45]
+toc: true
+toc-depth: 2
+---
+
+
+# Introduction
+
+Torsten is a fork of Stan containing additional Stan language functions to facilitate implementation of pharmacometric models. It plays a role analogous to prediction for population pharmacokinetics (PREDPP) for NONMEM® models. The simplest way to install Torsten is to use the `install_torsten()` function from the `bbr.bayes` package.
+
+This page demonstrates how to install Torsten using the `install_torsten()` function.
+
+# Set up
+
+<hr />
+
+Load required packages and set file paths to your model and figure directories. 
+
+```{r}
+library(bbr)
+library(bbr.bayes)
+library(here)
+
+```
+
+# Basic installation
+
+The `install_torsten()` function attempts to download and install the latest release of Torsten. The following statement installs Torsten as a folder named "Torsten" in the project folder. By default, the installation will not overwrite a previous installation of the same Torsten version at that location. You can overwrite a previous installation by adding `overwrite = TRUE`. You may want to do that in cases where you want to change the C++ compiler options via the `cpp_options` argument.
+
+```{r, eval = TRUE}
+
+install_torsten(dir = here("Torsten"))
+
+```
+
+# Enabling multi-threading
+
+One strategy for reducing computation time of Stan/Torsten analyses is to use the `reduce_sum` Stan function to allow within-chain parallel computation via multi-threading. That requires specific compiler options when Torsten is installed. The following statement installs Torsten using the compiler options needed for multi-threading.
+
+```{r, eval = TRUE}
+
+install_torsten(dir = here("Torsten"), overwrite = TRUE,
+                cpp_options = list(stan_threads = TRUE))
+
+```
+
+

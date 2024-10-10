@@ -1,0 +1,250 @@
+---
+title: "MCMC Diagnostics"
+subtitle: > 
+  Example MCMC diagnostics with <font class=mrgc>bbr.bayes</font>.
+#image: bbr-strip.png
+order: 500
+categories: 
+- bbr.bayes
+- diagnostics
+fig-cap-location: margin
+toc: true
+toc-depth: 2
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  cache = TRUE, 
+  autodep = TRUE, 
+  comment = '.', 
+  message = FALSE,
+  warning = FALSE,
+  out.width = 500, 
+  out.height = 750
+)
+```
+
+# Introduction
+
+In this Expo, we make the distinction between two types of diagnostics:
+
+* Markov Chain Monte Carlo (MCMC) convergence diagnostics
+* Model diagnostics, aka, goodness-of-fit (GOF) diagnostics
+
+This page demonstrates the use of `bbr.bayes`, and other tools, to generate MCMC diagnostics for Stan/Torsten Bayesian (Bayes) models.
+
+There is no explicit functionality in `bbr.bayes` to perform these steps; however, the output from `bbr.bayes` makes these steps relatively simple.
+
+# Tools used
+
+<hr />
+
+## MetrumRG packages
+{{< var used.bbr >}}
+{{< var used.bbrbayes >}}
+
+## CRAN packages
+{{< var used.dplyr >}}
+{{< var used.bayesplot >}}
+{{< var used.posterior >}}
+
+
+# Set up
+
+<hr />
+
+Load required packages and set file paths to your model and figure directories. 
+
+```{r}
+library(bbr)
+library(bbr.bayes)
+library(here)
+library(tidyverse)
+library(posterior)
+library(bayesplot)
+library(glue)
+library(kableExtra)
+
+cmdstanr::set_cmdstan_path(path = here("Torsten", "v0.91.0", "cmdstan"))
+
+source(here("script", "mcmc-diagnostic-functions.R"))
+
+MODEL_DIR <- here("model", "stan")
+
+bayesplot::color_scheme_set('viridis')
+theme_set(theme_bw())
+```
+
+# MCMC diagnostics
+
+After fitting the model, we examine a suite of MCMC diagnostics to see if anything is amiss with the sampling. Focus on split Rhat, bulk and tail ESS (effective sample size), trace plots, and density plots. If any of these raise a flag about convergence, then additional diagnostics would be examined.
+
+## Model summary
+
+We begin by reading in the output from our first base model, ppkexpo1. This is done using the `read_fit_model` function from {{< var tools.bbrbayes >}} which returns a CmdStanMCMC object that provides several methods for querying the fitting results. For example, `fit$draws()` returns a draws array containing the MCMC samples.
+
+```{r}
+model_name <- "ppkexpo1"
+mod <- read_model(here(MODEL_DIR, model_name))
+fit <- read_fit_model(mod)
+
+fit$cmdstan_diagnose()
+
+pars <- c("CLHat", "QHat", "V2Hat", "V3Hat", "kaHat",
+          "sigma", glue("omega[{1:5}]"),
+          paste0("rho[", matrix(apply(expand.grid(1:5, 1:5),
+                                      1, paste, collapse = ","),
+                                ncol = 5)[upper.tri(diag(5), 
+                                                    diag = FALSE)], "]"))
+# Get posterior samples for parameters of interest
+posterior <- fit$draws(variables = pars)
+# Get quantities related to NUTS performance, e.g., occurrence of
+# divergent transitions
+np <- nuts_params(fit) 
+
+n_iter <- dim(posterior)[1]
+n_chains <- dim(posterior)[2]
+
+draws_sum <- fit$summary(variables = pars)
+ptable <- draws_sum %>%
+  mutate(across(-variable, ~ pmtables::sig(.x, maxex = 4))) %>% 
+  rename(parameter = variable) %>%
+  mutate("90% CI" = paste("(", q5, ", ", q95, ")", 
+                          sep = "")) %>%
+  select(parameter, mean, median, sd, mad, "90% CI", ess_bulk, ess_tail, rhat)
+
+ptable %>% 
+  kable %>%
+  kable_styling()
+```
+
+For the population-level parameters, the Rhat values are less than or equal to 1.05 except for omega[2]. Also, some ESS bulk and tail values are on the low side. In addition, a couple divergent transitions occurred.
+
+## Rhat plot
+
+We visualize the Rhat values with the `mcmc_rhat` function from {{< var outside_tools.bayesplot >}}.
+
+```{r rhat}
+rhats <- draws_sum$rhat
+names(rhats) <- draws_sum$variable
+rhat_plot <- mcmc_rhat(rhats) + yaxis_text()
+```
+
+```{r}
+#| label: fig-rhat-ppkexpo1
+#| fig-cap: R-hat plot for model ppkexpo1.
+#| out-width: 100%
+rhat_plot
+```
+
+## ESS plots
+
+We can also visualize the bulk and tail ESS as ratios of the effective sample size (Neff) to the total number of iterations (N). 
+
+```{r ess_bulk}
+ess_bulk <- draws_sum$ess_bulk
+names(ess_bulk) <- draws_sum$variable
+ess_bulk_ratios <- ess_bulk / (n_iter * n_chains)
+ess_bulk_plot <- mcmc_neff(ess_bulk_ratios) + yaxis_text() +
+  labs(title = "Bulk ESS ratios")
+```
+
+```{r}
+#| label: fig-ess-bulk-ppkexpo1
+#| fig-cap: ESS bulk plot for model ppkexpo1.
+#| out-width: 100%
+ess_bulk_plot
+```
+
+
+```{r ess_tail}
+ess_tail <- draws_sum$ess_tail
+names(ess_tail) <- draws_sum$variable
+ess_tail_ratios <- ess_tail / (n_iter * n_chains)
+ess_tail_plot <- mcmc_neff(ess_tail_ratios) + yaxis_text() +
+  labs(title = "Tail ESS ratios")
+```
+
+```{r}
+#| label: fig-ess-tail-ppkexpo1
+#| fig-cap: ESS tail plot for model ppkexpo1.
+#| out-width: 100%
+ess_tail_plot
+```
+
+
+## Trace and density plots
+
+Next, we look at the trace and density plots.
+
+```{r}
+mcmc_history_plots <- mcmc_history(posterior,
+                                  nParPerPage = 6, 
+                                  np = np)
+```
+ 
+
+```{r}
+#| label: fig-trace-ppkexpo1
+#| fig-cap: MCMC trace plots for model ppkexpo1.
+#| out-width: 100%
+mcmc_history_plots
+```
+
+
+
+```{r}
+  mcmc_density_chain_plots <- mcmc_density(posterior, 
+                                           nParPerPage = 6, byChain = TRUE)
+```
+
+```{r}
+#| label: fig-density-ppkexpo1
+#| fig-cap: MCMC density plots for model ppkexpo1.
+#| out-width: 100%
+mcmc_density_chain_plots
+```
+
+A scatterplot of the MCMC draws can be useful in showing bivariate relationships in the posterior distribution. The default scatterplot generated with `mcmc_pairs` uses points for the off-diagonal panels and histograms along the diagonal. We restrict this plot to only CLHat, QHat, V2Hat, V3Hat, kaHat, and sigma.
+
+```{r}
+pairs_plot <- mcmc_pairs(posterior, pars = pars[!(grepl("rho", pars) | grepl("omega", pars))])
+```
+
+```{r}
+#| label: fig-pairs-ppkexpo1
+#| fig-cap: Plots of bivariate distributions of model parameters, a.k.a., pairs plots.
+#| out-width: 100%
+pairs_plot
+```
+
+
+A more informative plot might use density estimates and transformations to bounded parameters. We can make these modifications using the `diag_fun`, `off_diag_fun`, and `transformations` arguments:
+
+```{r}
+pairs_plot2 <- mcmc_pairs(posterior, 
+           pars = pars[!(grepl("rho", pars) | grepl("omega",
+                                                           pars))],
+           transformations = "log",
+           diag_fun = 'dens',
+           off_diag_fun = 'hex')
+```
+
+```{r}
+#| label: fig-pairs2-ppkexpo1
+#| fig-cap: Plots of bivariate distributions of model parameters, a.k.a., pairs plots.
+#| out-width: 100%
+pairs_plot2
+```
+
+While most MCMC diagnostics look reasonably good, `omega[2]` is a notable exception as shown by a large Rhat, low effective sample sizes, a "wiggly snake" trace plot, and density plots indicating differences among the chains. The small number of divergent transitions, while not serious, suggests we should consider some intervention. The next logical steps are to increase the number of MCMC iterations, or reparameterize, to improve sampling performance (or both).
+
+# Other resources
+ <hr /> 
+ 
+The following script from the {{< var public_expo_repo.main >}} is discussed on this page. If you're interested running this code, visit the {{< var pages.about_the_repo >}} page first.
+
+MCMC Diagnostics script: {{< var public_expo_repo.mcmc_diagnostics >}}
+
+More details on the visual MCMC diagnostics are available in a {{< var pkg_resource.bayesplot_vignettes >}} from `bayesplot` package developers.

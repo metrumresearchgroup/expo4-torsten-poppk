@@ -1,0 +1,368 @@
+---
+title: "Summarizing and Comparing Models"
+subtitle: > 
+  Using `bbr.bayes` functions to summarize modeling history 
+#image: bbr-strip.png
+order: 500
+categories: 
+- bbr
+- model history
+- model comparison
+fig-cap-location: margin
+toc: true
+toc-depth: 2
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  cache = TRUE, 
+  autodep = TRUE, 
+  comment = '.', 
+  message = FALSE,
+  warning = FALSE,
+  out.width = 500, 
+  out.height = 750
+)
+```
+
+# Introduction
+
+Summarizing and comparing multiple models in a workflow is often a relatively slow manual process. `bbr` has been extended to include functions that automate much of that process for Stan models. The resulting model summaries provide a condensed overview of the key decisions made during the model development process. The modeling summary functions take advantage of the annotation features of `bbr` (e.g., the description, notes, and tags discussed in the "Initial model" page) to summarize the important features of key models.
+
+The page demonstrates how to:
+
+-   Create and modify model run logs
+-   Check and compare model tags
+-   Calculate expected log predictive density (ELPD) for model comparison based on approximate leave one observation out and leave one individual (or group) out cross validation (LOO-CV and LOGO-CV)
+-   Add LOO-CV ELPD and LOGO-CV ELPD to the summary tables constructed with `bbr`
+
+# Tools used
+
+<hr />
+
+## MetrumRG packages
+{{< var used.bbr >}}
+{{< var used.bbrbayes >}}
+
+## CRAN packages
+
+{{< var used.dplyr >}}
+
+# Set up
+
+<hr />
+
+Load required packages and set file paths to your model and figure directories.
+
+```{r}
+library(bbr)
+library(bbr.bayes)
+library(here)
+library(tidyverse)
+library(yspec)
+library(cmdstanr)
+library(posterior)
+library(bayesplot)
+library(tidybayes)
+library(loo)
+library(glue)
+library(kableExtra)
+
+set_cmdstan_path(path = here("Torsten", "v0.91.0", "cmdstan"))
+
+MODEL_DIR <- here("model", "stan")
+FIGURE_DIR <- here("deliv", "figure")
+```
+
+```{r, echo=FALSE}
+
+bayesplot::color_scheme_set('viridis')
+theme_set(theme_bw())
+
+```
+
+# Using `run_log` and `stan_summary_log`
+
+<!--# Briefly describe run_log, stan_summary_log and stan_add_summary -->
+
+We can use `run_log()` to create a log of all, or a subset of, the models we've constructed.
+
+```{r}
+model_log <- run_log(MODEL_DIR,
+                     .include = paste0("ppkexpo", 1:5))
+```
+
+The return object is a tibble with information about each model including: (1) where the model resides on disk; (2) the model type (Stan vs `stan_gq`); (3) model description; (4) tags and notes added to the model object; (5) and a field indicating the model on which each model is based. For our worked example, a `glimpse` of `model_log` looks like this:
+
+```{r}
+glimpse(model_log)
+```
+
+`stan_add_summary()` may be used to add information to the run log about the modeling results. This includes information about the Markov Chain Monte Carlo (MCMC) sampling and its performance and summary statistics for model parameters specified via the `variables` argument.
+
+```{r}
+model_log <- model_log %>% 
+  stan_add_summary(variables = c("lp__", "CLHat", "QHat", "V2Hat", "V3Hat",
+                                "kaHat", "sigma", glue("omega[{1:5}]")),
+                    summary_fns = list("median", "rhat"))
+
+glimpse(model_log)
+```
+
+From that tibble, it's relatively easy to construct a table summarizing your model development. For example, the following code generates a table summarizing the characteristics of our sequence of models along with the posterior median log probability (`lp__`) for each model which is a crude measure of model fit.
+
+```{r}
+model_log %>% 
+  add_tags_diff() %>%
+  select(run, based_on,  description, tags_added, tags_removed, lp___median) %>%
+  mutate(lp___median = pmtables::sig(lp___median, 4)) %>%
+  knitr::kable() %>%
+  kable_styling()
+```
+
+Use `stan_summary_log()` to summarize and compare model results. The tibble it produces includes information about the MCMC sampling and its performance. It contains summary statistics for model parameters specified via the `variables` argument. Additionally, it contains the `CmdStanMCMC` object for each model. 
+
+```{r}
+
+sum_log <- stan_summary_log(MODEL_DIR,
+                            .include = paste0("ppkexpo", 1:4))
+glimpse(sum_log)
+```
+
+The functions provided by the `CmdStanMCMC` objects in the summary log may be used to generate additional model results. For example, we demonstrate the use of the `$loo()` function to add information relevant to model comparison for the summary log. Particularly, we calculate the ELPD (commonly used metric for Bayesian (Bayes) model comparison) based on an approximation of LOO-CV.
+
+```{r}
+
+sum_log <- sum_log %>%
+  mutate(LOO_ELPD = map_vec(fit, \(x) x$loo(cores = 4, 
+                                            save_psis = TRUE)$estimates[1, 1]))
+
+sum_log %>%
+  select(run, nchains, iter_warmup, iter_sampling, num_divergent, 
+         num_max_treedepth, bad_ebfmi, LOO_ELPD) %>%
+  knitr::kable() %>%
+  kable_styling()
+```
+
+# Model comparison using ELPD
+
+LOO-CV approximates out of sample prediction error for a new observation in the same individuals. For mixed effects models like the population pharmacokinetic (popPK) models in this expo, a better metric for model comparison is based on LOGO-CV. In our case, the "group" of interest is an individual subject or patient. LOGO-CV approximates out of sample prediction error for new observations in new individuals.
+
+The calculation of LOO-ELPD shown above uses the likelihoods contributed by each observation. For models ppkexpo1, ppkexpo2, ppkexpo3, and ppkexpo4, those likelihoods are contained in the `log_lik` vector. To calculate LOGO-ELPD, we need to derive the log-likelihood contribution for each independent unit. For our analysis, this corresponds to the likelihood at the subject level.
+
+For non-linear mixed effect models, such as the one we're using here, the log-likelihood is not available in a closed-form solution. So, we derive it using a Monte Carlo approximation. Specifically, we want to calculate the likelihood for the $i^{th}$ individual:
+
+$$
+\log \ell_i(\boldsymbol{\theta},\boldsymbol{\Omega} ~|~ \mathbf{y}_i) = \log \left( \int f(\mathbf{y}_i ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}) ~f(\boldsymbol{\eta} ~|~ \boldsymbol{\Omega}) ~ d\boldsymbol{\eta} \right)
+$$ The Monte Carlo approximation to the integral is derived as:
+
+```{=tex}
+\begin{align*}
+\ell_i(\boldsymbol{\theta},\boldsymbol{\Omega} ~|~ \mathbf{y}_i) &= \int \prod_{j=1}^{n_i} f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}) ~f(\boldsymbol{\eta} ~|~ \boldsymbol{\Omega}) ~ d\boldsymbol{\eta} \\
+ & \approx \frac{1}{M} \sum_{m=1}^M \prod_{j=1}^{n_i} f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}^{(m)}) ~f(\boldsymbol{\eta}^{(m)} ~|~ \boldsymbol{\Omega}) \\
+ & = \frac{1}{M} \sum_{m=1}^M \exp \left( \sum_{j=1}^{n_i} \log f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}^{(m)}) + \log f(\boldsymbol{\eta}^{(m)} ~|~ \boldsymbol{\Omega}) \right)
+ \end{align*}
+```
+Thus, the approximation to $\log \ell_i(\boldsymbol{\theta},\boldsymbol{\Omega} ~|~ \mathbf{y}_i)$ is given by
+
+```{=tex}
+\begin{align*}
+\log \ell_i(\boldsymbol{\theta},\boldsymbol{\Omega} ~|~ \mathbf{y}_i) & \approx \log(\sum_{m=1}^M \exp(A_i)) - \log M \\
+ & = \text{log\_sum\_exp}(A_i) - \log M
+\end{align*}
+```
+where $M$ is the number of Monte Carlo samples, $\eta^{(m)}$ is a draw from the distribution $f(\boldsymbol{\eta} ~|~ \boldsymbol{\Omega})$, `log_sum_exp` corresponding to the Stan function of the same name, and
+
+$$
+A_i = \sum_{j=1}^{n_i} \log f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}^{(m)}) + \log f(\boldsymbol{\eta}^{(m)} ~|~ \boldsymbol{\Omega})
+$$
+
+To calculate the LOGO-ELPD for our models, we take advantage of the ability in `cmdstan` to run a stand-alone generated quantities model like we did in the section on "Generated Quantities Models." We demonstrate the process in detail with the ppkexpo2 model. Let's start by re-reading the parent model and copying it to a generated quantities model called ppkexpo2_gq1.
+
+```{r setup_ppkexpo2_gq1,eval = TRUE}
+ppkexpo2 <- read_model(here(MODEL_DIR, "ppkexpo2"))
+ppkexpo2_gq1 <- copy_model_as_stan_gq(ppkexpo2, "ppkexpo2_gq1", .inherit_tags = TRUE, 
+                      .overwrite = TRUE) %>%
+  add_description("PopPK model: ppkexpo2 model to generate approximate individual log-likelihoods")
+```
+
+Now, manually edit `ppkexpo2_gq1.stan` by deleting the contents of the model{} block and adding the simulation code in the generated quantities{} block. Also edit `ppkexpo2_gq1-standata.R` to add `idObs` and `idBlq` to the data set. For this demo, we copy previously created files from the demo folder.
+
+```{r setup2_ppkexpo2_gq1,eval = TRUE}
+ppkexpo2_gq1 <- ppkexpo2_gq1 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo2_gq1.stan")) %>%
+  add_standata_file(here(MODEL_DIR, "demo", "ppkexpo2_gq1-standata.R"))
+```
+
+Here is the resulting Stan model.
+
+```{r, echo=FALSE}
+ppkexpo2_gq1 <- read_model(here(MODEL_DIR, "ppkexpo2_gq1"))
+cat(readLines(get_model_path(ppkexpo2_gq1)), sep = "\n")
+```
+
+## Submit the model
+
+```{r sim_ppkexpo2_gq1,eval = TRUE}
+## Set cmdstanr arguments
+ppkexpo2_gq1 <- ppkexpo2_gq1 %>%
+  set_stanargs(list(parallel_chains = 4,
+                    seed = 1234),
+               .clear = TRUE)
+
+## Check that the necessary files are present
+check_stan_model(ppkexpo2_gq1)
+
+## Simulate using Stan
+ppkexpo2_gq1_sim <- ppkexpo2_gq1 %>% submit_model(.overwrite = TRUE)
+
+ppkexpo2_loo_id <- loo(ppkexpo2_gq1_sim$draws(variables = "log_lik_id"), cores = 4, save_psis = TRUE)
+ppkexpo2_loo_id
+
+```
+
+Now, let's do the same for ppkexpo3_gq1 and ppkexpo4_gq1.
+
+```{r sim_ppkexpo34_gq1,eval = TRUE}
+
+ppkexpo3 <- read_model(here(MODEL_DIR, "ppkexpo3"))
+ppkexpo3_gq1 <- copy_model_as_stan_gq(ppkexpo3, "ppkexpo3_gq1", .inherit_tags = TRUE, 
+                      .overwrite = TRUE) %>%
+  add_description("PopPK model: ppkexpo3 model to generate approximate individual log-likelihoods")
+ppkexpo3_gq1 <- ppkexpo3_gq1 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo3_gq1.stan")) %>%
+  add_standata_file(here(MODEL_DIR, "demo", "ppkexpo3_gq1-standata.R"))
+
+ppkexpo4 <- read_model(here(MODEL_DIR, "ppkexpo4"))
+ppkexpo4_gq1 <- copy_model_as_stan_gq(ppkexpo4, "ppkexpo4_gq1", .inherit_tags = TRUE, 
+                      .overwrite = TRUE) %>%
+  add_description("PopPK model: ppkexpo4 model to generate approximate individual log-likelihoods")
+ppkexpo4_gq1 <- ppkexpo4_gq1 %>%
+  add_stanmod_file(here(MODEL_DIR, "demo", "ppkexpo4_gq1.stan")) %>%
+  add_standata_file(here(MODEL_DIR, "demo", "ppkexpo4_gq1-standata.R"))
+
+ppkexpo3_gq1 <- ppkexpo3_gq1 %>%
+  set_stanargs(list(parallel_chains = 4,
+                    seed = 1234),
+               .clear = TRUE)
+
+## Check that the necessary files are present
+check_stan_model(ppkexpo3_gq1)
+
+## Simulate using Stan
+ppkexpo3_gq1_sim <- ppkexpo3_gq1 %>% submit_model(.overwrite = TRUE)
+
+ppkexpo4_gq1 <- ppkexpo4_gq1 %>%
+  set_stanargs(list(parallel_chains = 4,
+                    seed = 1234),
+               .clear = TRUE)
+
+## Check that the necessary files are present
+check_stan_model(ppkexpo4_gq1)
+
+## Simulate using Stan
+ppkexpo4_gq1_sim <- ppkexpo4_gq1 %>% submit_model(.overwrite = TRUE)
+
+```
+
+If ppkexpo2, ppkexpo3, ppkexpo4, ppkexpo2_gq1, ppkexpo3_gq1, and ppkexpo4_gq1 have already been run, you can read them using the following statements without having to re-simulate.
+
+```{r read_ppkexpo234_gq1}
+ppkexpo2 <- read_model(here(MODEL_DIR, "ppkexpo2"))
+ppkexpo2_fit <- read_fit_model(ppkexpo2)
+
+ppkexpo3 <- read_model(here(MODEL_DIR, "ppkexpo3"))
+ppkexpo3_fit <- read_fit_model(ppkexpo3)
+
+ppkexpo4 <- read_model(here(MODEL_DIR, "ppkexpo4"))
+ppkexpo4_fit <- read_fit_model(ppkexpo4)
+
+ppkexpo2_gq1 <- read_model(here(MODEL_DIR, "ppkexpo2_gq1"))
+ppkexpo2_gq1_sim <- read_fit_model(ppkexpo2_gq1)
+
+ppkexpo3_gq1 <- read_model(here(MODEL_DIR, "ppkexpo3_gq1"))
+ppkexpo3_gq1_sim <- read_fit_model(ppkexpo3_gq1)
+
+ppkexpo4_gq1 <- read_model(here(MODEL_DIR, "ppkexpo4_gq1"))
+ppkexpo4_gq1_sim <- read_fit_model(ppkexpo4_gq1)
+```
+
+## Calculate LOO-ELPD and LOGO-ELPD
+
+Now, let's calculate LOO-ELPD and LOGO-ELPD for each model. As before, we calculate LOO-ELPD using the `loo` function of the fit objects for each model. For LOGO-ELPD, we need to call the `loo` function of the `loo` R package. 
+
+```{r}
+
+sum_log <- stan_summary_log(MODEL_DIR,
+                            .include = paste0("ppkexpo", 2:4))
+
+
+## LOO-CV 
+ppkexpo2_loo <- ppkexpo2_fit$loo(cores = 4, save_psis = TRUE)
+ppkexpo3_loo <- ppkexpo3_fit$loo(cores = 4, save_psis = TRUE)
+ppkexpo4_loo <- ppkexpo4_fit$loo(cores = 4, save_psis = TRUE)
+
+## LOGO-CV 
+ppkexpo2_loo_id <- loo(ppkexpo2_gq1_sim$draws(variable = "log_lik_id"), cores = 4, save_psis = TRUE)
+ppkexpo3_loo_id <- loo(ppkexpo3_gq1_sim$draws(variable = "log_lik_id"), cores = 4, save_psis = TRUE)
+ppkexpo4_loo_id <- loo(ppkexpo4_gq1_sim$draws(variable = "log_lik_id"), cores = 4, save_psis = TRUE)
+
+```
+
+
+## Add LOO-ELPD and LOGO-ELPD to the summary log
+
+Now, we can add both LOO-ELPD and LOGO-ELPD to the summary log and print it as a table.
+
+```{r}
+
+loo_id <- data.frame(run = c("ppkexpo2", "ppkexpo3", "ppkexpo4"),
+                     elpd_loo = c(ppkexpo2_loo$estimates[1,1],
+                                   ppkexpo3_loo$estimates[1,1],
+                                   ppkexpo4_loo$estimates[1,1]),
+                     elpd_logo = c(ppkexpo2_loo_id$estimates[1,1],
+                                   ppkexpo3_loo_id$estimates[1,1],
+                                   ppkexpo4_loo_id$estimates[1,1]))
+sum_log <- sum_log %>%
+  left_join(loo_id)
+
+sum_log %>%
+  select(run, iter_warmup, iter_sampling, num_divergent, bad_ebfmi, elpd_loo, elpd_logo) %>%
+  mutate(elpd_loo = pmtables::sig(elpd_loo, 5),
+         elpd_logo = pmtables::sig(elpd_logo, 5)) %>%
+  knitr::kable() %>%
+  kable_styling()
+```
+  
+## Compare `ppkexpo2`, `ppkexpo3`, and `ppkexpo4`
+
+The `loo_compare` function calculates various quantities relevant to comparing the models. These include the difference between the ELPD value for each model relative to the model with the highest value and the standard error of that difference. Let's apply `loo_compare` to both LOO-ELPD and LOGO-ELPD.
+
+### Model comparison with respect to LOO-CV
+```{r}
+
+loo_compare(ppkexpo2_loo, ppkexpo3_loo, ppkexpo4_loo) %>%
+  knitr::kable(digits = 2) %>%
+  add_header_above(c("model1 = ppkexpo2, model2 = ppkexpo3, model3 = ppkexpo4" = 9)) %>%
+  add_header_above(c("LOO-CV" = 9), bold = TRUE) %>%
+  kable_styling()
+```
+
+### Model comparison with respect to LOGO-CV
+```{r}
+loo_compare(ppkexpo2_loo_id, ppkexpo3_loo_id, ppkexpo4_loo_id) %>%
+  knitr::kable(digits = 2) %>%
+  add_header_above(c("model1 = ppkexpo2, model2 = ppkexpo3, model3 = ppkexpo4" = 9)) %>%
+  add_header_above(c("LOGO-CV" = 9), bold = TRUE) %>%
+  kable_styling()
+```
+
+The LOGO-ELPD indicates that ppkexpo4 results in a greater LOGO-ELPD than the other models, and the difference is substantially greater than its standard error. The LOO-ELPD results are less definitive, but that's not too surprising given that the models differ primarily with respect to model elements related to interindividual variation. Such differences are expected to have greater effect on sample error for new individuals than that for just new observations in the same individuals.
+
+# Other resources
+ <hr /> 
+ 
+The following script from the {{< var public_expo_repo.main >}} is discussed on this page. If you're interested running this code, visit the {{< var pages.about_the_repo >}} page first.
+
+Modeling Summary script: {{< var public_expo_repo.modeling_summary >}} 

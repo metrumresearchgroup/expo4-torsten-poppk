@@ -1,0 +1,42 @@
+Version: 1
+
+Packages:
+  - tidyverse
+  - cmdstanr
+  - bayesplot
+  - posterior
+  - loo
+  - magick
+  - pdftools
+  - bbr
+  - bbr.bayes
+  - data.table
+  - here
+  - mrggsave
+  - patchwork
+  - pmplots
+  - pmtables
+  - pmforest
+  - mrgmisc
+  - tidyverse
+  - vpc
+  - yspec
+  - kableExtra
+  - devtools
+  - rstantools
+  - hexbin
+  - tidybayes
+  - tidyvpc
+
+Repos:
+  - MPN: https://mpn.metworx.com/snapshots/stable/2024-06-12
+
+Customizations:
+  Packages:
+  - bbr: {Suggests: true}
+  - bbr.bayes: {Suggests: true}
+
+Lockfile:
+    Type: renv
+
+Rpath: ${R_EXE_4_3}
