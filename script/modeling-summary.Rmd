@@ -358,7 +358,7 @@ loo_compare(ppkexpo2_loo_id, ppkexpo3_loo_id, ppkexpo4_loo_id) %>%
   kable_styling()
 ```
 
-The LOGO-ELPD indicates that ppkexpo4 results in a greater LOGO-ELPD than the other models, and the difference is substantially greater than its standard error. The LOO-ELPD results are less definitive, but that's not too surprising given that the models differ primarily with respect to model elements related to interindividual variation. Such differences are expected to have greater effect on sample error for new individuals than that for just new observations in the same individuals.
+The LOGO-ELPD indicates that ppkexpo4 results in a greater LOGO-ELPD than the other models, and the difference is substantially greater than its standard error. The LOO-ELPD results are less definitive, but that's not too surprising given that the models differ primarily with respect to model elements related to interindividual variation. Such differences are expected to have greater effect on out of sample error for new individuals than that for just new observations in the same individuals.
 
 # Other resources
  <hr /> 
