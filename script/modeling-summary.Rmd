@@ -160,8 +160,8 @@ $$ The Monte Carlo approximation to the integral is derived as:
 ```{=tex}
 \begin{align*}
 \ell_i(\boldsymbol{\theta},\boldsymbol{\Omega} ~|~ \mathbf{y}_i) &= \int \prod_{j=1}^{n_i} f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}) ~f(\boldsymbol{\eta} ~|~ \boldsymbol{\Omega}) ~ d\boldsymbol{\eta} \\
- & \approx \frac{1}{M} \sum_{m=1}^M \prod_{j=1}^{n_i} f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}^{(m)}) ~f(\boldsymbol{\eta}^{(m)} ~|~ \boldsymbol{\Omega}) \\
- & = \frac{1}{M} \sum_{m=1}^M \exp \left( \sum_{j=1}^{n_i} \log f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}^{(m)}) + \log f(\boldsymbol{\eta}^{(m)} ~|~ \boldsymbol{\Omega}) \right)
+ & \approx \frac{1}{M} \sum_{m=1}^M \prod_{j=1}^{n_i} f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}^{(m)}) \\
+ & = \frac{1}{M} \sum_{m=1}^M \exp \left( \sum_{j=1}^{n_i} \log f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}^{(m)}) \right)
  \end{align*}
 ```
 Thus, the approximation to $\log \ell_i(\boldsymbol{\theta},\boldsymbol{\Omega} ~|~ \mathbf{y}_i)$ is given by
@@ -175,7 +175,7 @@ Thus, the approximation to $\log \ell_i(\boldsymbol{\theta},\boldsymbol{\Omega} 
 where $M$ is the number of Monte Carlo samples, $\eta^{(m)}$ is a draw from the distribution $f(\boldsymbol{\eta} ~|~ \boldsymbol{\Omega})$, `log_sum_exp` corresponding to the Stan function of the same name, and
 
 $$
-A_i = \sum_{j=1}^{n_i} \log f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}^{(m)}) + \log f(\boldsymbol{\eta}^{(m)} ~|~ \boldsymbol{\Omega})
+A_i = \sum_{j=1}^{n_i} \log f(y_{ij} ~|~ \boldsymbol{\theta}, \boldsymbol{\Omega}, \boldsymbol{\eta}^{(m)})
 $$
 
 To calculate the LOGO-ELPD for our models, we take advantage of the ability in `cmdstan` to run a stand-alone generated quantities model like we did in the section on "Generated Quantities Models." We demonstrate the process in detail with the ppkexpo2 model. Let's start by re-reading the parent model and copying it to a generated quantities model called ppkexpo2_gq1.

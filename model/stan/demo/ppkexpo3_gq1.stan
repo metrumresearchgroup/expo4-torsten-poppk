@@ -91,7 +91,7 @@ generated quantities{
   {
     int nSim = 1000;
     // simulated individual log-likelihood
-    array[nId] vector[nSim] log_lik_id_sim;
+    array[nId] vector[nSim] log_lik_id_sim = rep_array(rep_vector(0, nSim), nId);
     // Individual parameters for hypothetical new individuals
     array[nId] vector[nRandom] thetaNew;
 //    array[nId] real CLNew, QNew, V2New, V3New, kaNew;
@@ -125,8 +125,6 @@ generated quantities{
       // Calculate log-likelihood values to use for LOO CV
       
       // Individual-level log-likelihood
-      for(j in 1:nId)
-        log_lik_id_sim[j, m] = multi_normal_lpdf(thetaNew[j] | thetaHat, Omega);
       for(i in 1:nObs)
         log_lik_id_sim[idObs[i], m] += lognormal_lpdf(cObs[i] | log(cHatNew[iObs[i]]), sigma);
       for(i in 1:nBlq)
